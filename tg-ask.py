@@ -172,7 +172,7 @@ class Telegram:
         parts = split_message(text)
         message_ids = []
         for index, part in enumerate(parts):
-            params: dict = {"chat_id": self.chat_id, "text": part, "parse_mode": "HTML"}
+            params: dict = {"chat_id": self.chat_id, "rich_message": {"html": part}}
             if self.thread_id:
                 try:
                     params["message_thread_id"] = int(self.thread_id)
@@ -182,7 +182,7 @@ class Telegram:
                 # keyboard attaches to the last part, otherwise to the message without options
                 if index == len(parts) - 1:
                     params["reply_markup"] = {"inline_keyboard": keyboard}
-            result = self.call("sendMessage", params, 30)
+            result = self.call("sendRichMessage", params, 30)
             assert isinstance(result, dict)
             message_ids.append(int(result["message_id"]))
         return message_ids
@@ -192,8 +192,7 @@ class Telegram:
         params = {
             "chat_id": self.chat_id,
             "message_id": message_id,
-            "text": text,
-            "parse_mode": "HTML",
+            "rich_message": {"html": text},
             "reply_markup": {"inline_keyboard": keyboard or []},
         }
         if self.thread_id:
@@ -433,37 +432,72 @@ def keyboard_for(field: dict, token: int, selected: set[int] | None = None) -> l
     return rows
 
 
-def build_prompt(header: str, field: dict, context: str, reply_required: bool) -> str:
+def _inline_code(escaped: str) -> str:
+    return re.sub(r"`([^`\n]+)`", r"<code>\1</code>", escaped)
+
+
+def format_text(text: str) -> str:
+    """Render plain text as paragraphs, turning fenced/inline code into code blocks."""
+    source = str(text)
+    blocks: list[str] = []
+    last = 0
+    for match in re.finditer(r"```([\w+-]*)\n(.*?)```", source, re.S):
+        before = source[last : match.start()]
+        if before.strip():
+            blocks.append(f"<p>{_inline_code(html.escape(before))}</p>")
+        language = match.group(1)
+        code = html.escape(match.group(2).rstrip("\n"))
+        attr = f' class="language-{language}"' if language else ""
+        blocks.append(f"<pre><code{attr}>{code}</code></pre>")
+        last = match.end()
+    rest = source[last:]
+    if rest.strip():
+        blocks.append(f"<p>{_inline_code(html.escape(rest))}</p>")
+    return "\n".join(blocks) or "<p></p>"
+
+
+def build_prompt(header: str, field: dict, context: str, reply_required: bool, code: str = "") -> str:
     e = html.escape
-    lines = [PRE_TITLE]
+    blocks = ["<h2>🤖 OpenCode</h2>"]
     if context:
-        lines.append(f"<i>{e(context)}</i>")
-    lines.append("")
-    lines.append(e(header or field["title"] or field["key"]))
+        blocks.append(f"<h3>{e(context)}</h3>")
+    blocks.append(format_text(header or field["title"] or field["key"]))
     if field["title"] and field["title"] != header:
-        lines.append(f"— {e(field['title'])}")
+        blocks.append(f"<p><i>{e(field['title'])}</i></p>")
+    if code:
+        blocks.append(f"<pre><code>{e(code)}</code></pre>")
     if field["external"]:
         if field["url"]:
             url = field["url"]
-            lines.append(f'<a href="{html.escape(url, quote=True)}">{e(url)}</a>')
-        return "\n".join(lines)
-    for index, option in enumerate(field["options"], start=1):
-        lines.append(f"{index}) {e(option['label'])}")
+            blocks.append(f'<p><a href="{html.escape(url, quote=True)}">{e(url)}</a></p>')
+        return "\n".join(blocks)
+    if field["options"]:
+        if field["type"] == "multiselect":
+            blocks.append("<p>Select options:</p>")
+            blocks.append("<ul>")
+            for option in field["options"]:
+                blocks.append(f'<li><input type="checkbox">{e(option["label"])}</li>')
+            blocks.append("</ul>")
+        else:
+            blocks.append("<ol>")
+            for option in field["options"]:
+                blocks.append(f"<li>{e(option['label'])}</li>")
+            blocks.append("</ol>")
     if field["type"] == "boolean":
-        lines.append('Answer "yes" or "no".')
+        blocks.append('<p>Answer "yes" or "no".</p>')
     elif field["type"] == "multiselect" and field["options"]:
-        lines.append('Mark options and press "Done".')
+        blocks.append('<p>Mark options and press "Done".</p>')
     elif field["options"]:
-        lines.append("Press a button or send a number/text.")
+        blocks.append("<p>Press a button or send a number/text.</p>")
     elif field["type"] == "multiselect":
-        lines.append("Answer with options separated by commas.")
+        blocks.append("<p>Answer with options separated by commas.</p>")
     else:
-        lines.append("Answer with text.")
+        blocks.append("<p>Answer with text.</p>")
     if not field["required"]:
-        lines.append('To skip — send "-".')
+        blocks.append('<p>To skip — send "-".</p>')
     if reply_required and (not field["options"] or field["custom"]):
-        lines.append("Bot can't see regular messages in this group: reply by swiping (Reply) to this message.")
-    return "\n".join(lines)
+        blocks.append("<p>Bot can't see regular messages in this group: reply by swiping (Reply) to this message.</p>")
+    return "\n".join(blocks)
 
 
 def label_for(field: dict, value: object) -> str:
@@ -477,7 +511,7 @@ def label_for(field: dict, value: object) -> str:
 
 def answered_text(prompt: str, answer: str) -> str:
     """Message after reply: original question on top, answer below (chat history)."""
-    tail = f"\n\n{ANSWER_MARK}: {html.escape(str(answer))}"
+    tail = f"\n\n<hr/>\n<p>{ANSWER_MARK}: {html.escape(str(answer))}</p>"
     room = MAX_EDIT - len(tail)
     if len(prompt) <= room:
         head = prompt
@@ -492,6 +526,7 @@ class Dialog:
         self.tg = telegram
         self.text = str(request.get("text") or "").strip()
         self.context = str(request.get("context") or "").strip()
+        self.code = str(request.get("code") or "").strip()
         self.fields = normalize_fields(request.get("fields") or [])
         try:
             timeout = float(request.get("timeout") or DEFAULT_TIMEOUT)
@@ -529,7 +564,7 @@ class Dialog:
         for index, field in enumerate(self.fields):
             header = self.text if index == 0 else ""
             if field["external"]:
-                ids = self.tg.send(build_prompt(field["title"], field, self.context, self.reply_required if hasattr(self, "reply_required") else False))
+                ids = self.tg.send(build_prompt(field["title"], field, self.context, self.reply_required, self.code))
                 # reply_required not set yet in this path; compute lazily below
                 self.message_ids.update(ids)
                 continue
@@ -547,7 +582,7 @@ class Dialog:
 
     def run_text_only(self) -> dict:
         free_text = normalize_fields([{"key": "answer", "type": "string"}])[0]
-        prompt = build_prompt(self.text, free_text, self.context, self.reply_required)
+        prompt = build_prompt(self.text, free_text, self.context, self.reply_required, self.code)
         base = split_message(prompt)[-1]
         message_ids = self.tg.send(prompt)
         self.message_ids.update(message_ids)
@@ -567,7 +602,7 @@ class Dialog:
         token = self.token
         has_buttons = bool(field["options"])
         selected: set[int] = set()
-        prompt = build_prompt(header, field, self.context, self.reply_required)
+        prompt = build_prompt(header, field, self.context, self.reply_required, self.code)
         base = split_message(prompt)[-1]
         keyboard = keyboard_for(field, token, selected) if has_buttons else None
         message_ids = self.tg.send(prompt, keyboard)
@@ -1135,7 +1170,13 @@ def selfcheck() -> int:
     check("split-keeps-text", sum(len(p) for p in parts) >= 7000, True)
 
     prompt = build_prompt("Permission required: shell", choice, "project", True)
-    check("prompt-options", "1) Yes" in prompt and "2) No" in prompt and "Press a button" in prompt, True)
+    check("prompt-options", "<li>Yes</li>" in prompt and "<li>No</li>" in prompt and "Press a button" in prompt, True)
+    check("prompt-heading", "<p>Permission required: shell</p>" in prompt, True)
+    check("prompt-rich-header", "<h2>🤖 OpenCode</h2>" in prompt and "<h3>project</h3>" in prompt, True)
+    check("prompt-checklist", '<input type="checkbox">' in build_prompt("Pick", multi, "project", False), True)
+    check("prompt-code", "<pre><code>echo hi</code></pre>" in build_prompt("Run", optional, "", False, "echo hi"), True)
+    check("prompt-fenced-code", '<pre><code class="language-sh">ls -la</code></pre>' in build_prompt("Run ```sh\nls -la\n```", optional, "", False), True)
+    check("prompt-inline-code", "<code>npm test</code>" in build_prompt("Run `npm test`", optional, "", False), True)
     check("prompt-reply-hint", "Reply" in build_prompt("Question", optional, "", True), True)
     check("prompt-no-reply-hint", "Reply" in build_prompt("Question", optional, "", False), False)
 
@@ -1154,9 +1195,9 @@ def selfcheck() -> int:
     # reply is appended to the original question, not replacing it
     history = answered_text("Keep supergroup?", "Keep supergroup")
     check("answered-keeps-prompt", history.startswith("Keep supergroup?\n\n"), True)
-    check("answered-appends", history.endswith(f"{ANSWER_MARK}: Keep supergroup"), True)
+    check("answered-appends", history.endswith(f"{ANSWER_MARK}: Keep supergroup</p>"), True)
     huge = answered_text("x" * 5000, "Yes")
-    check("answered-fits-limit", len(huge) <= MAX_EDIT and huge.endswith(f"{ANSWER_MARK}: Yes"), True)
+    check("answered-fits-limit", len(huge) <= MAX_EDIT and huge.endswith(f"{ANSWER_MARK}: Yes</p>"), True)
     check("answered-truncated", "…" in huge, True)
 
     # message edit: without buttons keyboard is removed, with a list it is replaced

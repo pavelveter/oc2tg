@@ -266,10 +266,10 @@ export default Plugin.define({
       const text = [
         `Permission required: ${request.action ?? "?"}`,
         request.message ? String(request.message) : "",
-        resources.length ? resources.map((item: string) => `— ${item}`).join("\n") : "",
       ]
         .filter(Boolean)
         .join("\n\n")
+      const code = resources.join("\n")
       const context = await describeSession(ctx, sessionID)
       logEvent({ kind: "permission-ask", id: requestID, sessionID, directory, action: request.action })
       const dialog = dialogAbort(abort.signal)
@@ -279,6 +279,7 @@ export default Plugin.define({
         result = await ask(
           {
             text,
+            code,
             context,
             fields: [
               {
