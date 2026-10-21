@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import html
 import json
 import os
 import queue
@@ -52,14 +53,14 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOCK_PATH = SCRIPT_DIR / ".tg-ask.lock"
-DAEMON_LOCK_PATH = SCRIPT_DIR / "tg-ask.daemon.lock"
+DAEMON_LOCK_PATH = SCRIPT_DIR / ".tg-ask.daemon.lock"
 SOCKET_PATH = SCRIPT_DIR / "tg-ask.sock"
 STATE_PATH = SCRIPT_DIR / "tg-ask.state.json"
 LOG_PATH = SCRIPT_DIR / "tg-ask.log"
 
-PRE_TITLE = "🤖 OpenCode"
-ANSWER_MARK = "✅ Accepted"
-EXPIRED_MARK = "⌛️ Timed out, no need to answer anymore."
+PRE_TITLE = "🤖 <b>OpenCode</b>"
+ANSWER_MARK = "✅ <b>Accepted</b>"
+EXPIRED_MARK = "⌛️ <i>Timed out, no need to answer anymore.</i>"
 MAX_EDIT = 3900  # margin under Telegram's 4096-char edit limit
 CHECKED = "✅"
 UNCHECKED = "⬜️"
@@ -136,10 +137,13 @@ def credentials() -> tuple[str, str]:
 
 # --- Telegram --------------------------------------------------------------
 class Telegram:
-    def __init__(self, token: str, chat_id: str) -> None:
+    def __init__(self, token: str, chat_id: str, thread_id: str | None = None) -> None:
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
         self.is_group = self.chat_id.startswith("-")
+        if thread_id is None:
+            thread_id = env_values().get("TELEGRAM_THREAD_ID", "").strip()
+        self.thread_id = thread_id or None
 
     def call(self, method: str, params: dict, timeout: float) -> object:
         body = json.dumps(params).encode("utf-8")
@@ -168,7 +172,12 @@ class Telegram:
         parts = split_message(text)
         message_ids = []
         for index, part in enumerate(parts):
-            params: dict = {"chat_id": self.chat_id, "text": part}
+            params: dict = {"chat_id": self.chat_id, "text": part, "parse_mode": "HTML"}
+            if self.thread_id:
+                try:
+                    params["message_thread_id"] = int(self.thread_id)
+                except (TypeError, ValueError):
+                    pass
             if keyboard:
                 # keyboard attaches to the last part, otherwise to the message without options
                 if index == len(parts) - 1:
@@ -180,22 +189,28 @@ class Telegram:
 
     def edit(self, message_id: int, text: str, keyboard: list[list[dict]] | None = None) -> None:
         """Edit a message. keyboard=None removes keyboard, a button list replaces it."""
-        self.call(
-            "editMessageText",
-            {
-                "chat_id": self.chat_id,
-                "message_id": message_id,
-                "text": text,
-                "reply_markup": {"inline_keyboard": keyboard or []},
-            },
-            15,
-        )
+        params = {
+            "chat_id": self.chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": keyboard or []},
+        }
+        if self.thread_id:
+            try:
+                params["message_thread_id"] = int(self.thread_id)
+            except (TypeError, ValueError):
+                pass
+        self.call("editMessageText", params, 15)
 
     def best_effort(self, what: str, function, *args) -> None:
         try:
             function(*args)
         except TgError as error:
             log_event(kind=f"{what}-failed", error=str(error))
+
+    def react(self, message_id: int, emoji: str) -> None:
+        self.best_effort("react", self.call, "setMessageReaction", {"chat_id": self.chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}, 15)
 
     def answer_button(self, callback_id: str, note: str = "") -> None:
         self.best_effort("answer-button", self.call, "answerCallbackQuery", {"callback_query_id": callback_id, "text": note[:200]}, 15)
@@ -419,23 +434,25 @@ def keyboard_for(field: dict, token: int, selected: set[int] | None = None) -> l
 
 
 def build_prompt(header: str, field: dict, context: str, reply_required: bool) -> str:
+    e = html.escape
     lines = [PRE_TITLE]
     if context:
-        lines.append(context)
+        lines.append(f"<i>{e(context)}</i>")
     lines.append("")
-    lines.append(header or field["title"] or field["key"])
+    lines.append(e(header or field["title"] or field["key"]))
     if field["title"] and field["title"] != header:
-        lines.append(f"— {field['title']}")
+        lines.append(f"— {e(field['title'])}")
     if field["external"]:
         if field["url"]:
-            lines.append(field["url"])
+            url = field["url"]
+            lines.append(f'<a href="{html.escape(url, quote=True)}">{e(url)}</a>')
         return "\n".join(lines)
     for index, option in enumerate(field["options"], start=1):
-        lines.append(f"{index}) {option['label']}")
+        lines.append(f"{index}) {e(option['label'])}")
     if field["type"] == "boolean":
-        lines.append("Answer \"yes\" or \"no\".")
+        lines.append('Answer "yes" or "no".')
     elif field["type"] == "multiselect" and field["options"]:
-        lines.append("Mark options and press \"Done\".")
+        lines.append('Mark options and press "Done".')
     elif field["options"]:
         lines.append("Press a button or send a number/text.")
     elif field["type"] == "multiselect":
@@ -443,7 +460,7 @@ def build_prompt(header: str, field: dict, context: str, reply_required: bool) -
     else:
         lines.append("Answer with text.")
     if not field["required"]:
-        lines.append("To skip — send \"-\".")
+        lines.append('To skip — send "-".')
     if reply_required and (not field["options"] or field["custom"]):
         lines.append("Bot can't see regular messages in this group: reply by swiping (Reply) to this message.")
     return "\n".join(lines)
@@ -460,7 +477,7 @@ def label_for(field: dict, value: object) -> str:
 
 def answered_text(prompt: str, answer: str) -> str:
     """Message after reply: original question on top, answer below (chat history)."""
-    tail = f"\n\n{ANSWER_MARK}: {answer}"
+    tail = f"\n\n{ANSWER_MARK}: {html.escape(str(answer))}"
     room = MAX_EDIT - len(tail)
     if len(prompt) <= room:
         head = prompt
@@ -503,6 +520,7 @@ class Dialog:
 
     def expire(self, message_id: int, prompt: str) -> None:
         self.tg.best_effort("expire", self.tg.edit, message_id, f"{prompt}\n\n{EXPIRED_MARK}")
+        self.tg.best_effort("react", self.tg.react, message_id, "👎")
 
     def run(self) -> dict:
         if not self.fields:
@@ -533,12 +551,15 @@ class Dialog:
         base = split_message(prompt)[-1]
         message_ids = self.tg.send(prompt)
         self.message_ids.update(message_ids)
+        if message_ids:
+            self.tg.best_effort("react", self.tg.react, message_ids[-1], "👀")
         reply = self.wait_reply()
         if not reply or reply.get("kind") != "text":
             self.expire(message_ids[-1], base)
             return {"ok": False, "reason": "timeout"}
         answer = reply["text"]
         self.tg.best_effort("confirm", self.tg.edit, message_ids[-1], answered_text(base, answer))
+        self.tg.best_effort("react", self.tg.react, message_ids[-1], "👍")
         return {"ok": True, "answers": {"answer": answer}, "raw": answer}
 
     def ask_field(self, field: dict, header: str) -> tuple[str, object, str]:
@@ -552,6 +573,7 @@ class Dialog:
         message_ids = self.tg.send(prompt, keyboard)
         self.message_ids.update(message_ids)
         message_id = message_ids[-1]
+        self.tg.best_effort("react", self.tg.react, message_id, "👀")
         attempts = 0
         inputs = 0
         while inputs < MAX_INPUTS:
@@ -577,6 +599,7 @@ class Dialog:
                     value = [field["options"][index - 1]["value"] for index in sorted(selected)]
                     self.tg.answer_button(reply["id"], "Accepted")
                     self.tg.best_effort("confirm", self.tg.edit, message_id, answered_text(base, label_for(field, value)))
+                    self.tg.best_effort("react", self.tg.react, message_id, "👍")
                     return "ok", value, ""
                 index = int(choice)
                 if not 1 <= index <= len(field["options"]):
@@ -590,13 +613,16 @@ class Dialog:
                 value = field["options"][index - 1]["value"]
                 self.tg.answer_button(reply["id"], "Accepted")
                 self.tg.best_effort("confirm", self.tg.edit, message_id, answered_text(base, label_for(field, value)))
+                self.tg.best_effort("react", self.tg.react, message_id, "👍")
                 return "ok", value, ""
             status, value, note = parse_answer(field, str(reply.get("text") or ""))
             if status == "ok":
                 self.tg.best_effort("confirm", self.tg.edit, message_id, answered_text(base, str(value)[:150]))
+                self.tg.best_effort("react", self.tg.react, message_id, "👍")
                 return status, value, note
             if status == "skip":
                 self.tg.best_effort("confirm", self.tg.edit, message_id, answered_text(base, "skipped"))
+                self.tg.best_effort("react", self.tg.react, message_id, "👍")
                 return status, value, note
             attempts += 1
             if not has_buttons and attempts >= MAX_ATTEMPTS:
@@ -1139,6 +1165,7 @@ def selfcheck() -> int:
             self.chat_id = "-1" if is_group else "1"
             self.is_group = is_group
             self.me = me or {}
+            self.thread_id = None
             self.calls: list[tuple[str, dict]] = []
 
         def call(self, method: str, params: dict, timeout: float) -> object:  # type: ignore[override]

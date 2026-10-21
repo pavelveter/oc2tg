@@ -4,3 +4,6 @@
 tg-ask.state.json
 .tg-ask.sock
 tg-ask.log
+
+__pycache__/
+*.pyc
