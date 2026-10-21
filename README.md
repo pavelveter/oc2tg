@@ -1,4 +1,4 @@
-# tg-ask — OpenCode questions in Telegram
+# OpenCode questions in Telegram
 
 Bridge between OpenCode and Telegram: everything OpenCode wants to ask you goes
 to the bot chat, and the answer comes straight back into the session — handy
@@ -56,8 +56,9 @@ and test the bridge:
 ```text
 Install tg-ask from https://github.com/pavelveter/oc2tg.
 
-1. Clone the repository to ~/Projects/tools/tg-ask (create the folder if needed).
-2. Run ./install.sh.
+1. Pick a permanent folder (for example ~/tg-ask) and clone the repository
+   there.
+2. cd into that folder and run ./install.sh.
 3. Ask me for TELEGRAM_BOT_TOKEN (from @BotFather) and TELEGRAM_CHAT_ID.
    If I don't know the chat id, run `python3 tg-ask.py --whoami`, tell me to
    message the bot, then read the id from the output.
@@ -70,7 +71,7 @@ Do not modify ~/.config/opencode/opencode.json; the plugin is loaded from the pl
 ### Manual install
 
 ```sh
-cd /Users/pavelveter/Projects/tools/tg-ask
+cd /path/to/tg-ask       # the folder you cloned into
 
 ./install.sh              # on first run creates the .env template
 # paste TELEGRAM_BOT_TOKEN from BotFather

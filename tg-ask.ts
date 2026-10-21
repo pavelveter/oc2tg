@@ -19,7 +19,7 @@ import { basename, dirname, join } from "node:path"
 
 // Script path: install.sh substitutes this folder's path at install time,
 // the TG_ASK_SCRIPT environment variable overrides it.
-const SCRIPT = process.env.TG_ASK_SCRIPT ?? "/Users/pavelveter/Projects/tools/tg-ask/tg-ask.py"
+const SCRIPT = process.env.TG_ASK_SCRIPT ?? "/absolute/path/to/tg-ask.py"
 const PYTHON = process.env.TG_ASK_PYTHON ?? "python3"
 const OPENCODE = process.env.TG_ASK_OPENCODE ?? "opencode"
 const LOG = join(dirname(SCRIPT), "tg-ask.log")
