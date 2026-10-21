@@ -1,3 +1,5 @@
+![tg-ask banner](banner.png)
+
 # OpenCode questions in Telegram
 
 Bridge between OpenCode and Telegram: everything OpenCode wants to ask you goes
