@@ -4,6 +4,7 @@
 Modes:
   notify <text>   send a message; stdout one JSON line: {"ok":true,"message_id":N}
   ask              JSON request on stdin, JSON response on stdout (see below)
+  --daemon         run the ephemeral coordinator (owns Telegram polling)
   --selfcheck      offline checks (no network)
   --check          installation diagnostics: creds, bot, chat type (needs network)
   --whoami         chat ids from messages to the bot (for filling .env)
@@ -36,15 +37,24 @@ import argparse
 import fcntl
 import json
 import os
+import queue
 import re
+import signal
+import socket
+import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOCK_PATH = SCRIPT_DIR / ".tg-ask.lock"
+DAEMON_LOCK_PATH = SCRIPT_DIR / "tg-ask.daemon.lock"
+SOCKET_PATH = SCRIPT_DIR / "tg-ask.sock"
+STATE_PATH = SCRIPT_DIR / "tg-ask.state.json"
 LOG_PATH = SCRIPT_DIR / "tg-ask.log"
 
 PRE_TITLE = "🤖 OpenCode"
@@ -61,6 +71,7 @@ MAX_PARTS = 6
 MAX_FIELDS = 20
 MAX_ATTEMPTS = 3
 MAX_INPUTS = 25  # guard against infinite loop on a single button form
+IDLE_TIMEOUT = 60.0
 TRUE_WORDS = {"y", "yes", "true", "t", "1", "+", "ok", "yeah", "yep"}
 FALSE_WORDS = {"n", "no", "false", "f", "0", "-", "nope"}
 SKIP_WORDS = {"-", "skip", "pass", "none"}
@@ -209,38 +220,6 @@ class Telegram:
                 break
             offset = int(updates[-1]["update_id"]) + 1
         return offset
-
-    def wait(self, offset: int, deadline: float) -> tuple[dict | None, int]:
-        """Wait for a reply (text or button) from the target chat until deadline."""
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                return None, offset
-            polling = min(POLL_TIMEOUT, max(1, left))
-            try:
-                updates = self.call(
-                    "getUpdates",
-                    {"offset": offset, "timeout": int(polling), "limit": 10, "allowed_updates": UPDATES},
-                    polling + 15,
-                )
-            except TgError as error:
-                log_event(kind="poll-failed", error=str(error))
-                time.sleep(2)
-                continue
-            for update in updates:
-                offset = int(update["update_id"]) + 1
-                callback = update.get("callback_query")
-                if callback:
-                    chat = (callback.get("message") or {}).get("chat") or {}
-                    if str(chat.get("id")) != self.chat_id:
-                        continue
-                    return {"kind": "button", "data": str(callback.get("data") or ""), "id": str(callback.get("id") or "")}, offset
-                message = update.get("message") or {}
-                if str((message.get("chat") or {}).get("id")) != self.chat_id:
-                    continue
-                text = message.get("text")
-                if text:
-                    return {"kind": "text", "text": str(text)}, offset
 
 
 UPDATES = ["message", "callback_query"]
@@ -492,7 +471,7 @@ def answered_text(prompt: str, answer: str) -> str:
 
 # --- dialog ----------------------------------------------------------------
 class Dialog:
-    def __init__(self, telegram: Telegram, request: dict, clock=time.monotonic) -> None:
+    def __init__(self, telegram: Telegram, request: dict, update_queue: queue.Queue, clock=time.monotonic) -> None:
         self.tg = telegram
         self.text = str(request.get("text") or "").strip()
         self.context = str(request.get("context") or "").strip()
@@ -502,19 +481,25 @@ class Dialog:
         except (TypeError, ValueError):
             timeout = DEFAULT_TIMEOUT
         self.deadline = clock() + min(max(timeout, 5.0), 86400.0)
-        self.offset = telegram.drain()
-        self.reply_required = telegram.group_privacy_on()
+        self.update_queue = update_queue
+        self.message_ids: set[int] = set()
+        self.awaiting = False
+        self.id: str | None = None
         self.token = 0
 
     def wait_reply(self) -> dict | None:
-        reply, self.offset = self.tg.wait(self.offset, self.deadline)
-        if reply is not None:
-            log_event(
-                kind="reply",
-                via=reply.get("kind"),
-                data=str(reply.get("data")) if reply.get("kind") == "button" else None,
-            )
-        return reply
+        self.awaiting = True
+        try:
+            while True:
+                left = self.deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                try:
+                    return self.update_queue.get(timeout=min(left, 1.0))
+                except queue.Empty:
+                    continue
+        finally:
+            self.awaiting = False
 
     def expire(self, message_id: int, prompt: str) -> None:
         self.tg.best_effort("expire", self.tg.edit, message_id, f"{prompt}\n\n{EXPIRED_MARK}")
@@ -526,7 +511,9 @@ class Dialog:
         for index, field in enumerate(self.fields):
             header = self.text if index == 0 else ""
             if field["external"]:
-                self.tg.send(build_prompt(field["title"], field, self.context, self.reply_required))
+                ids = self.tg.send(build_prompt(field["title"], field, self.context, self.reply_required if hasattr(self, "reply_required") else False))
+                # reply_required not set yet in this path; compute lazily below
+                self.message_ids.update(ids)
                 continue
             status, value, note = self.ask_field(field, header)
             if status == "timeout":
@@ -545,6 +532,7 @@ class Dialog:
         prompt = build_prompt(self.text, free_text, self.context, self.reply_required)
         base = split_message(prompt)[-1]
         message_ids = self.tg.send(prompt)
+        self.message_ids.update(message_ids)
         reply = self.wait_reply()
         if not reply or reply.get("kind") != "text":
             self.expire(message_ids[-1], base)
@@ -562,6 +550,7 @@ class Dialog:
         base = split_message(prompt)[-1]
         keyboard = keyboard_for(field, token, selected) if has_buttons else None
         message_ids = self.tg.send(prompt, keyboard)
+        self.message_ids.update(message_ids)
         message_id = message_ids[-1]
         attempts = 0
         inputs = 0
@@ -612,8 +601,41 @@ class Dialog:
             attempts += 1
             if not has_buttons and attempts >= MAX_ATTEMPTS:
                 return "invalid", None, note
-            self.tg.send(f"⚠️ {note}\nTry again.")
+            ids = self.tg.send(f"⚠️ {note}\nTry again.")
+            self.message_ids.update(ids)
         return "invalid", None, "too many invalid answers"
+
+
+# reply_required is computed once per dialog; set in run via property-like init
+@property
+def _reply_required(self) -> bool:
+    return getattr(self, "_rr", False)
+
+# We'll set reply_required as attribute during a lazy init helper instead.
+def _ensure_reply_required(self) -> None:
+    if not hasattr(self, "reply_required"):
+        self.reply_required = self.tg.group_privacy_on()
+        self.offset = 0
+
+
+Dialog._ensure_reply_required = _ensure_reply_required
+
+# Monkey: call _ensure_reply_required at start of run
+_orig_run = Dialog.run
+def _run_with_rr(self):
+    self._ensure_reply_required()
+    return _orig_run(self)
+Dialog.run = _run_with_rr
+_orig_run_text = Dialog.run_text_only
+def _run_text_with_rr(self):
+    self._ensure_reply_required()
+    return _orig_run_text(self)
+Dialog.run_text_only = _run_text_with_rr
+_orig_ask_field = Dialog.ask_field
+def _ask_with_rr(self, field, header):
+    self._ensure_reply_required()
+    return _orig_ask_field(self, field, header)
+Dialog.ask_field = _ask_with_rr
 
 
 def with_lock(callback):
@@ -701,14 +723,269 @@ def check() -> int:
     return 0
 
 
+# --- daemon / client -------------------------------------------------------
+def save_state(active: dict) -> None:
+    try:
+        data = {"dialogs": [{"message_ids": sorted(d.message_ids)} for d in active.values()]}
+        STATE_PATH.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"dialogs": []}
+
+
+def expire_stale(tg: Telegram) -> None:
+    state = load_state()
+    for dialog in state.get("dialogs", []):
+        for mid in dialog.get("message_ids", []):
+            tg.best_effort("expire", tg.edit, mid, EXPIRED_MARK)
+    try:
+        STATE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def ensure_daemon() -> None:
+    # try connect
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        sock.connect(str(SOCKET_PATH))
+        sock.close()
+        return
+    except (OSError, socket.error):
+        pass
+    # spawn
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "--daemon"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    for _ in range(50):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect(str(SOCKET_PATH))
+            sock.close()
+            return
+        except (OSError, socket.error):
+            time.sleep(0.1)
+    raise TgError("failed to start daemon")
+
+
+def daemon_request(request: dict) -> dict:
+    ensure_daemon()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(300)
+    sock.connect(str(SOCKET_PATH))
+    sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    sock.close()
+    if not buf.strip():
+        raise TgError("empty daemon response")
+    return json.loads(buf.decode("utf-8"))
+
+
+def client_ask(request: dict) -> dict:
+    return daemon_request({"type": "ask", "request": request})
+
+
+def daemon_main() -> int:
+    # singleton
+    DAEMON_LOCK_PATH.touch(exist_ok=True)
+    lock_handle = open(DAEMON_LOCK_PATH, "a+")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        # another daemon is running
+        return 0
+    try:
+        token, chat_id = credentials()
+    except TgError as error:
+        print(f"tg-ask: {error}", file=sys.stderr)
+        return 1
+    tg = Telegram(token, chat_id)
+    try:
+        SOCKET_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    expire_stale(tg)
+
+    stop_event = threading.Event()
+    update_queue: queue.Queue = queue.Queue()
+    active_dialogs: dict[str, Dialog] = {}
+    active_lock = threading.Lock()
+    client_count = {"n": 0}
+    client_lock = threading.Lock()
+    last_activity = [time.monotonic()]
+
+    def route_update(update: dict) -> None:
+        cb = update.get("callback_query")
+        if cb:
+            msg = (cb.get("message") or {})
+            mid = msg.get("message_id")
+            with active_lock:
+                targets = [d for d in active_dialogs.values() if mid in d.message_ids]
+            if targets:
+                targets[0].update_queue.put({"kind": "button", "data": str(cb.get("data") or ""), "id": str(cb.get("id") or "")})
+            return
+        message = update.get("message") or {}
+        if str((message.get("chat") or {}).get("id")) != str(tg.chat_id):
+            return
+        text = message.get("text")
+        if not text:
+            return
+        reply_to = (message.get("reply_to_message") or {}).get("message_id")
+        with active_lock:
+            if reply_to is not None:
+                targets = [d for d in active_dialogs.values() if reply_to in d.message_ids]
+            else:
+                awaiting = [d for d in active_dialogs.values() if getattr(d, "awaiting", False)]
+                if len(awaiting) == 1:
+                    targets = awaiting
+                elif len(awaiting) > 1:
+                    try:
+                        tg.send("Multiple questions are open. Reply by swiping (Reply) to the specific message.")
+                    except TgError:
+                        pass
+                    return
+                else:
+                    targets = []
+        if targets:
+            targets[0].update_queue.put({"kind": "text", "text": str(text)})
+
+    def poll_loop() -> None:
+        offset = tg.drain()
+        while not stop_event.is_set():
+            try:
+                updates = tg.call("getUpdates", {"offset": offset, "timeout": 20, "limit": 10, "allowed_updates": UPDATES}, 40)
+            except TgError as error:
+                log_event(kind="poll-failed", error=str(error))
+                time.sleep(2)
+                continue
+            for update in updates or []:
+                offset = int(update["update_id"]) + 1
+                route_update(update)
+
+    threading.Thread(target=poll_loop, daemon=True).start()
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(SOCKET_PATH))
+    server.listen(16)
+    server.settimeout(1.0)
+
+    def handle_client(conn: socket.socket) -> None:
+        with client_lock:
+            client_count["n"] += 1
+        last_activity[0] = time.monotonic()
+        try:
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            if not buf.strip():
+                return
+            request = json.loads(buf.decode("utf-8"))
+            if request.get("type") == "notify":
+                try:
+                    ids = tg.send(str(request.get("text") or ""))
+                    conn.sendall((json.dumps({"ok": True, "message_ids": ids, "message_id": ids[0] if ids else None}) + "\n").encode("utf-8"))
+                except TgError as error:
+                    conn.sendall((json.dumps({"ok": False, "reason": "error", "error": str(error)}) + "\n").encode("utf-8"))
+                return
+            payload = request.get("request") or {}
+            dialog_id = uuid.uuid4().hex
+            dq: queue.Queue = queue.Queue()
+            dialog = Dialog(tg, payload, dq)
+            dialog.id = dialog_id
+            with active_lock:
+                active_dialogs[dialog_id] = dialog
+            save_state(active_dialogs)
+            last_activity[0] = time.monotonic()
+            try:
+                result = dialog.run()
+            except Exception as error:  # pragma: no cover
+                log_event(kind="dialog-crashed", id=dialog_id, error=str(error))
+                result = {"ok": False, "reason": "error", "error": str(error)}
+            finally:
+                with active_lock:
+                    active_dialogs.pop(dialog_id, None)
+                save_state(active_dialogs)
+            conn.sendall((json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))
+            last_activity[0] = time.monotonic()
+        except Exception as error:
+            log_event(kind="client-error", error=str(error))
+        finally:
+            conn.close()
+            with client_lock:
+                client_count["n"] -= 1
+
+    def accept_loop() -> None:
+        while not stop_event.is_set():
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=accept_loop, daemon=True).start()
+
+    def idle_watcher() -> None:
+        while not stop_event.is_set():
+            time.sleep(5)
+            with active_lock:
+                active_count = len(active_dialogs)
+            with client_lock:
+                cc = client_count["n"]
+            if active_count == 0 and cc == 0:
+                if time.monotonic() - last_activity[0] >= IDLE_TIMEOUT:
+                    stop_event.set()
+            else:
+                last_activity[0] = time.monotonic()
+
+    threading.Thread(target=idle_watcher, daemon=True).start()
+
+    while not stop_event.is_set():
+        time.sleep(1)
+    server.close()
+    try:
+        SOCKET_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    lock_handle.close()
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="tg-ask.py", description=__doc__)
     parser.add_argument("mode", nargs="?", choices=["notify", "ask"], help="notify | ask")
     parser.add_argument("text", nargs="*", help="text for notify mode")
+    parser.add_argument("--daemon", action="store_true", help="run the ephemeral coordinator")
     parser.add_argument("--selfcheck", action="store_true", help="offline checks")
     parser.add_argument("--check", action="store_true", help="installation diagnostics")
     parser.add_argument("--whoami", action="store_true", help="show chat ids from messages to the bot")
     args = parser.parse_args(argv)
+    if args.daemon:
+        return daemon_main()
     if args.selfcheck:
         return selfcheck()
     if args.check:
@@ -736,7 +1013,7 @@ def main(argv: list[str]) -> int:
         if not isinstance(request, dict):
             raise TgError("request must be a JSON object")
         log_event(kind="ask", text=str(request.get("text") or "")[:200], fields=len(request.get("fields") or []))
-        result = with_lock(lambda: Dialog(telegram, request).run())
+        result = client_ask(request)
         log_event(kind="ask-done", ok=result.get("ok"), reason=result.get("reason"))
         return emit(result)
     except TgError as error:
