@@ -25,6 +25,20 @@ Keep the supergroup?
 ✅ Accepted: Keep the supergroup
 ```
 
+## Rich messages
+
+Prompts use Telegram's rich message API (`sendRichMessage` / `rich_message.html`)
+and are edited in place:
+
+- `<h2>🤖 OpenCode</h2>` header plus a session sub-header;
+- the question itself is ordinary text;
+- fenced and inline code is rendered as code blocks;
+- single-choice options become an ordered list, multiselect becomes a checklist;
+- permission resources are sent as a code block;
+- reactions show state: 👀 while waiting, 👍 on answer, 👎 on timeout.
+
+There is no plain-text fallback: if the Telegram API rejects rich messages, the send fails.
+
 ## Requirements
 
 - OpenCode v2 (tested on 2.0.32) and its `opencode` CLI in `PATH`;
@@ -33,6 +47,27 @@ Keep the supergroup?
 - a bot from [@BotFather](https://t.me/BotFather).
 
 ## Installation
+
+### Install with OpenCode
+
+Copy the block below into an OpenCode session — the agent will clone, configure,
+and test the bridge:
+
+```text
+Install tg-ask from https://github.com/pavelveter/oc2tg.
+
+1. Clone the repository to ~/Projects/tools/tg-ask (create the folder if needed).
+2. Run ./install.sh.
+3. Ask me for TELEGRAM_BOT_TOKEN (from @BotFather) and TELEGRAM_CHAT_ID.
+   If I don't know the chat id, run `python3 tg-ask.py --whoami`, tell me to
+   message the bot, then read the id from the output.
+4. Put both values into .env.
+5. Run ./install.sh --test and report whether the test message arrived.
+
+Do not modify ~/.config/opencode/opencode.json; the plugin is loaded from the plugins folder.
+```
+
+### Manual install
 
 ```sh
 cd /Users/pavelveter/Projects/tools/tg-ask
@@ -127,7 +162,8 @@ That the plugin loaded is visible in `~/.local/share/opencode/log/opencode.log`:
 | `tg-ask.ts` | OpenCode plugin: `form.created` and `permission.asked` → script, reply → session |
 | `install.sh` | install plugin into OpenCode and checks |
 | `.env` | token and chat (in `.gitignore`) |
-| `tg-ask.log`, `.tg-ask.lock` | log and dialog lock (generated, in `.gitignore`) |
+| `tg-ask.log`, `.tg-ask.lock`, `.tg-ask.daemon.lock` | log and locks (generated, in `.gitignore`) |
+| `tg-ask.state.json`, `tg-ask.sock` | coordinator state and Unix socket (generated, in `.gitignore`) |
 
 ## Removal
 
