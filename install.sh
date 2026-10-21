@@ -54,6 +54,8 @@ TELEGRAM_BOT_TOKEN=
 # Where to send questions and read answers from: personal chat id or group id (-100...)
 # Your id is shown by: python3 tg-ask.py --whoami
 TELEGRAM_CHAT_ID=
+# (optional) forum topic id (message_thread_id) to send into a specific topic
+TELEGRAM_THREAD_ID=
 EOF
   echo "• created $DIR/.env — fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (see README.md)"
 fi

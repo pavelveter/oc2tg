@@ -108,6 +108,7 @@ That the plugin loaded is visible in `~/.local/share/opencode/log/opencode.log`:
 | `TG_ASK_PYTHON` | Python interpreter | `python3` |
 | `TG_ASK_OPENCODE` | CLI for replying to forms | `opencode` |
 | `OPENCODE_CONFIG_DIR` | OpenCode config folder | `~/.config/opencode` |
+| `TELEGRAM_THREAD_ID` | forum topic id to send into | (none) |
 
 ## Limitations
 
