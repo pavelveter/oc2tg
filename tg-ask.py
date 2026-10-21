@@ -53,7 +53,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOCK_PATH = SCRIPT_DIR / ".tg-ask.lock"
-DAEMON_LOCK_PATH = SCRIPT_DIR / "tg-ask.daemon.lock"
+DAEMON_LOCK_PATH = SCRIPT_DIR / ".tg-ask.daemon.lock"
 SOCKET_PATH = SCRIPT_DIR / "tg-ask.sock"
 STATE_PATH = SCRIPT_DIR / "tg-ask.state.json"
 LOG_PATH = SCRIPT_DIR / "tg-ask.log"
