@@ -111,8 +111,9 @@ That the plugin loaded is visible in `~/.local/share/opencode/log/opencode.log`:
 
 ## Limitations
 
-- **One dialog at a time** (file lock `.tg-ask.lock`). If questions arrive simultaneously,
-  the second waits for the first; a reply sent before the second dialog starts is ignored.
+- **Multiple dialogs can run in parallel** via an ephemeral coordinator. In a personal chat a
+  plain-text reply without Reply can be ambiguous when several questions are open — in that
+  case reply by swiping (Reply) to the specific message.
 - Fields of type `external` (OAuth links, etc.) are shown in Telegram but not filled in.
 - Conditional fields (`when`) are not filtered — sent as is.
 - Hidden fields (`hidden`) are skipped; if there's nothing to fill, the form stays with the terminal.

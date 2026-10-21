@@ -1,3 +1,6 @@
 .env
 .tg-ask.lock
+.tg-ask.daemon.lock
+tg-ask.state.json
+.tg-ask.sock
 tg-ask.log
