@@ -47,16 +47,9 @@ fail() {
 command -v "$PYTHON" >/dev/null 2>&1 || fail "$PYTHON not found (set TG_ASK_PYTHON=/path/to/python3)"
 
 if [ ! -f "$DIR/.env" ]; then
+  [ -f "$DIR/.env.example" ] || fail "missing $DIR/.env.example"
   umask 077
-  cat >"$DIR/.env" <<'EOF'
-# Bot token from @BotFather
-TELEGRAM_BOT_TOKEN=
-# Where to send questions and read answers from: personal chat id or group id (-100...)
-# Your id is shown by: python3 tg-ask.py --whoami
-TELEGRAM_CHAT_ID=
-# (optional) forum topic id (message_thread_id) to send into a specific topic
-TELEGRAM_THREAD_ID=
-EOF
+  cp "$DIR/.env.example" "$DIR/.env"
   echo "• created $DIR/.env — fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (see README.md)"
 fi
 

@@ -65,14 +65,9 @@ MAX_EDIT = 3900  # margin under Telegram's 4096-char edit limit
 CHECKED = "✅"
 UNCHECKED = "⬜️"
 DONE_LABEL = "Done"
-DEFAULT_TIMEOUT = 900.0
-POLL_TIMEOUT = 30
 PART_LIMIT = 3500  # margin under Telegram's 4096-char limit
 MAX_PARTS = 6
 MAX_FIELDS = 20
-MAX_ATTEMPTS = 3
-MAX_INPUTS = 25  # guard against infinite loop on a single button form
-IDLE_TIMEOUT = 60.0
 TRUE_WORDS = {"y", "yes", "true", "t", "1", "+", "ok", "yeah", "yep"}
 FALSE_WORDS = {"n", "no", "false", "f", "0", "-", "nope"}
 SKIP_WORDS = {"-", "skip", "pass", "none"}
@@ -124,6 +119,29 @@ def env_values() -> dict[str, str]:
         if from_env:
             values[key] = from_env
     return values
+
+
+def env_value(key: str) -> str:
+    """Environment variable wins over .env next to the script."""
+    return (os.environ.get(key) or env_values().get(key) or "").strip()
+
+
+def env_number(key: str, default: float) -> float:
+    """Positive number from env; empty, invalid or non-positive — default."""
+    try:
+        value = float(env_value(key))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# --- tunables from .env ----------------------------------------------------
+DEFAULT_TIMEOUT = env_number("TG_ASK_TIMEOUT", 900.0)  # wait for a reply, seconds
+IDLE_TIMEOUT = env_number("TG_ASK_IDLE_TIMEOUT", 60.0)  # daemon exits after this idleness
+HTTP_TIMEOUT = env_number("TG_ASK_HTTP_TIMEOUT", 30.0)  # one Telegram API request
+POLL_TIMEOUT = max(1, int(env_number("TG_ASK_POLL_TIMEOUT", 20)))  # getUpdates long poll
+MAX_ATTEMPTS = max(1, int(env_number("TG_ASK_MAX_ATTEMPTS", 3)))
+MAX_INPUTS = max(1, int(env_number("TG_ASK_MAX_INPUTS", 25)))  # guard against infinite button loop
 
 
 def credentials() -> tuple[str, str]:
@@ -182,7 +200,7 @@ class Telegram:
                 # keyboard attaches to the last part, otherwise to the message without options
                 if index == len(parts) - 1:
                     params["reply_markup"] = {"inline_keyboard": keyboard}
-            result = self.call("sendRichMessage", params, 30)
+            result = self.call("sendRichMessage", params, HTTP_TIMEOUT)
             assert isinstance(result, dict)
             message_ids.append(int(result["message_id"]))
         return message_ids
@@ -200,7 +218,7 @@ class Telegram:
                 params["message_thread_id"] = int(self.thread_id)
             except (TypeError, ValueError):
                 pass
-        self.call("editMessageText", params, 15)
+        self.call("editMessageText", params, HTTP_TIMEOUT)
 
     def best_effort(self, what: str, function, *args) -> None:
         try:
@@ -209,17 +227,17 @@ class Telegram:
             log_event(kind=f"{what}-failed", error=str(error))
 
     def react(self, message_id: int, emoji: str) -> None:
-        self.best_effort("react", self.call, "setMessageReaction", {"chat_id": self.chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}, 15)
+        self.best_effort("react", self.call, "setMessageReaction", {"chat_id": self.chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}, HTTP_TIMEOUT)
 
     def answer_button(self, callback_id: str, note: str = "") -> None:
-        self.best_effort("answer-button", self.call, "answerCallbackQuery", {"callback_query_id": callback_id, "text": note[:200]}, 15)
+        self.best_effort("answer-button", self.call, "answerCallbackQuery", {"callback_query_id": callback_id, "text": note[:200]}, HTTP_TIMEOUT)
 
     def group_privacy_on(self) -> bool:
         """In a group with Privacy mode, the bot only receives replies to its own messages (getMe)."""
         if not self.is_group:
             return False
         try:
-            me = self.call("getMe", {}, 15)
+            me = self.call("getMe", {}, HTTP_TIMEOUT)
             return not bool((me or {}).get("can_read_all_group_messages"))
         except TgError as error:
             log_event(kind="getme-failed", error=str(error))
@@ -229,7 +247,7 @@ class Telegram:
         """Drop accumulated updates, return offset for the next request."""
         offset = 0
         for _ in range(20):
-            updates = self.call("getUpdates", {"offset": offset, "timeout": 0, "limit": 100, "allowed_updates": UPDATES}, 30)
+            updates = self.call("getUpdates", {"offset": offset, "timeout": 0, "limit": 100, "allowed_updates": UPDATES}, HTTP_TIMEOUT)
             if not updates:
                 break
             offset = int(updates[-1]["update_id"]) + 1
@@ -281,7 +299,9 @@ def normalize_fields(raw: object) -> list[dict]:
             label = str(option.get("label") or "").strip()
             value = option.get("value", label)
             if label:
-                options.append({"label": label, "value": value})
+                options.append(
+                    {"label": label, "value": value, "description": str(option.get("description") or "").strip()}
+                )
         fields.append(
             {
                 "key": key,
@@ -436,6 +456,18 @@ def _inline_code(escaped: str) -> str:
     return re.sub(r"`([^`\n]+)`", r"<code>\1</code>", escaped)
 
 
+def option_html(option: dict) -> str:
+    """Option label with its description on the next line (empty descriptions are skipped).
+
+    The blank line after the description keeps it from running into the next list item.
+    """
+    label = html.escape(option["label"])
+    description = option.get("description") or ""
+    if not description:
+        return label
+    return f"{label}<br><i>{_inline_code(html.escape(description))}</i><br><br>"
+
+
 def format_text(text: str) -> str:
     """Render plain text as paragraphs, turning fenced/inline code into code blocks."""
     source = str(text)
@@ -472,16 +504,17 @@ def build_prompt(header: str, field: dict, context: str, reply_required: bool, c
             blocks.append(f'<p><a href="{html.escape(url, quote=True)}">{e(url)}</a></p>')
         return "\n".join(blocks)
     if field["options"]:
+        blocks.append("<br>")  # line break so the list does not sit on the question text
         if field["type"] == "multiselect":
             blocks.append("<p>Select options:</p>")
             blocks.append("<ul>")
             for option in field["options"]:
-                blocks.append(f'<li><input type="checkbox">{e(option["label"])}</li>')
+                blocks.append(f'<li><input type="checkbox">{option_html(option)}</li>')
             blocks.append("</ul>")
         else:
             blocks.append("<ol>")
             for option in field["options"]:
-                blocks.append(f"<li>{e(option['label'])}</li>")
+                blocks.append(f"<li>{option_html(option)}</li>")
             blocks.append("</ol>")
     if field["type"] == "boolean":
         blocks.append('<p>Answer "yes" or "no".</p>')
@@ -766,7 +799,7 @@ def check() -> int:
     telegram = Telegram(token, chat_id)
     print(f"✓ .env: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID present ({SCRIPT_DIR / '.env'})")
     try:
-        me = telegram.call("getMe", {}, 15)
+        me = telegram.call("getMe", {}, HTTP_TIMEOUT)
     except TgError as error:
         print(f"✗ bot unavailable (network or token): {error}")
         return 1
@@ -843,7 +876,8 @@ def ensure_daemon() -> None:
 def daemon_request(request: dict) -> dict:
     ensure_daemon()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(300)
+    # the dialog deadline plus a margin: the daemon answers when the dialog ends
+    sock.settimeout(DEFAULT_TIMEOUT + 60)
     sock.connect(str(SOCKET_PATH))
     sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
     buf = b""
@@ -930,7 +964,7 @@ def daemon_main() -> int:
         offset = tg.drain()
         while not stop_event.is_set():
             try:
-                updates = tg.call("getUpdates", {"offset": offset, "timeout": 20, "limit": 10, "allowed_updates": UPDATES}, 40)
+                updates = tg.call("getUpdates", {"offset": offset, "timeout": POLL_TIMEOUT, "limit": 10, "allowed_updates": UPDATES}, POLL_TIMEOUT + 10)
             except TgError as error:
                 log_event(kind="poll-failed", error=str(error))
                 time.sleep(2)
@@ -1095,6 +1129,15 @@ def selfcheck() -> int:
 
     check("env", parse_env('# c\nexport A = "x y"\nB=1\nbroken\n'), {"A": "x y", "B": "1"})
 
+    # tunables from env: valid value wins, junk and non-positive fall back to the default
+    os.environ["TG_ASK_SELFCHECK_KEY"] = "7.5"
+    check("tunable-env", env_number("TG_ASK_SELFCHECK_KEY", 1.0), 7.5)
+    os.environ["TG_ASK_SELFCHECK_KEY"] = "junk"
+    check("tunable-invalid", env_number("TG_ASK_SELFCHECK_KEY", 1.0), 1.0)
+    os.environ["TG_ASK_SELFCHECK_KEY"] = "-5"
+    check("tunable-non-positive", env_number("TG_ASK_SELFCHECK_KEY", 1.0), 1.0)
+    del os.environ["TG_ASK_SELFCHECK_KEY"]
+
     choice = normalize_fields(
         [{"key": "k", "type": "string", "options": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}]}]
     )[0]
@@ -1172,6 +1215,7 @@ def selfcheck() -> int:
     prompt = build_prompt("Permission required: shell", choice, "project", True)
     check("prompt-options", "<li>Yes</li>" in prompt and "<li>No</li>" in prompt and "Press a button" in prompt, True)
     check("prompt-heading", "<p>Permission required: shell</p>" in prompt, True)
+    check("prompt-list-break", "<p>Permission required: shell</p>\n<br>\n<ol>" in prompt, True)
     check("prompt-rich-header", "<h2>🤖 OpenCode</h2>" in prompt and "<h3>project</h3>" in prompt, True)
     check("prompt-checklist", '<input type="checkbox">' in build_prompt("Pick", multi, "project", False), True)
     check("prompt-code", "<pre><code>echo hi</code></pre>" in build_prompt("Run", optional, "", False, "echo hi"), True)
@@ -1179,6 +1223,17 @@ def selfcheck() -> int:
     check("prompt-inline-code", "<code>npm test</code>" in build_prompt("Run `npm test`", optional, "", False), True)
     check("prompt-reply-hint", "Reply" in build_prompt("Question", optional, "", True), True)
     check("prompt-no-reply-hint", "Reply" in build_prompt("Question", optional, "", False), False)
+
+    described = normalize_fields(
+        [{"key": "k", "options": [{"label": "Fast", "value": "fast", "description": "Uses `say`, ~2 min"}]}]
+    )[0]
+    check("option-description", described["options"][0]["description"], "Uses `say`, ~2 min")
+    check(
+        "prompt-option-description",
+        "<li>Fast<br><i>Uses <code>say</code>, ~2 min</i><br><br></li>" in build_prompt("Pick", described, "", False),
+        True,
+    )
+    check("prompt-option-no-empty-italic", "<i></i>" in build_prompt("Pick", choice, "", False), False)
 
     external = normalize_fields([{"key": "u", "type": "external", "external": True, "url": "https://x.y"}])[0]
     check("external-url", "https://x.y" in build_prompt("OAuth", external, "", False), True)

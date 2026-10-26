@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin"
 import { spawn } from "node:child_process"
-import { appendFileSync, existsSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 
 // Telegram ↔ OpenCode bridge.
@@ -23,7 +23,24 @@ const SCRIPT = process.env.TG_ASK_SCRIPT ?? "/absolute/path/to/tg-ask.py"
 const PYTHON = process.env.TG_ASK_PYTHON ?? "python3"
 const OPENCODE = process.env.TG_ASK_OPENCODE ?? "opencode"
 const LOG = join(dirname(SCRIPT), "tg-ask.log")
-const TIMEOUT_SEC = 900 // how long to wait for a Telegram reply
+
+// Tunables live in the same .env as the credentials (environment wins, as in the script).
+function envValue(key: string): string {
+  const fromProcess = process.env[key]
+  if (fromProcess) return fromProcess.trim()
+  try {
+    const line = readFileSync(join(dirname(SCRIPT), ".env"), "utf8")
+      .split("\n")
+      .map((item) => item.trim())
+      .find((item) => item.startsWith(`${key}=`))
+    return line ? line.slice(key.length + 1).trim().replace(/^["']|["']$/g, "") : ""
+  } catch {
+    return ""
+  }
+}
+
+const CONFIGURED_TIMEOUT = Number(envValue("TG_ASK_TIMEOUT"))
+const TIMEOUT_SEC = CONFIGURED_TIMEOUT > 0 ? CONFIGURED_TIMEOUT : 900 // how long to wait for a Telegram reply
 const GRACE_SEC = 60 // margin before forcibly ending the dialog
 const TIMEOUT_NOTE = `No answer in Telegram within ${Math.round(TIMEOUT_SEC / 60)} minutes.`
 
@@ -155,7 +172,11 @@ function toAskField(field: Record<string, unknown>): AskField | undefined {
   const options = Array.isArray(field.options)
     ? field.options.map((option) => {
         const item = (option ?? {}) as Record<string, unknown>
-        return { label: String(item.label ?? ""), value: item.value }
+        return {
+          label: String(item.label ?? ""),
+          value: item.value,
+          description: String(item.description ?? ""),
+        }
       })
     : undefined
   return {
