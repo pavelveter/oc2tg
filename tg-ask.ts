@@ -155,7 +155,11 @@ function toAskField(field: Record<string, unknown>): AskField | undefined {
   const options = Array.isArray(field.options)
     ? field.options.map((option) => {
         const item = (option ?? {}) as Record<string, unknown>
-        return { label: String(item.label ?? ""), value: item.value }
+        return {
+          label: String(item.label ?? ""),
+          value: item.value,
+          description: String(item.description ?? ""),
+        }
       })
     : undefined
   return {

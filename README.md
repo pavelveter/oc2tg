@@ -35,7 +35,8 @@ and are edited in place:
 - `<h2>🤖 OpenCode</h2>` header plus a session sub-header;
 - the question itself is ordinary text;
 - fenced and inline code is rendered as code blocks;
-- single-choice options become an ordered list, multiselect becomes a checklist;
+- single-choice options become an ordered list with each option's description under its label,
+  multiselect becomes a checklist;
 - permission resources are sent as a code block;
 - reactions show state: 👀 while waiting, 👍 on answer, 👎 on timeout.
 

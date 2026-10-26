@@ -281,7 +281,9 @@ def normalize_fields(raw: object) -> list[dict]:
             label = str(option.get("label") or "").strip()
             value = option.get("value", label)
             if label:
-                options.append({"label": label, "value": value})
+                options.append(
+                    {"label": label, "value": value, "description": str(option.get("description") or "").strip()}
+                )
         fields.append(
             {
                 "key": key,
@@ -436,6 +438,15 @@ def _inline_code(escaped: str) -> str:
     return re.sub(r"`([^`\n]+)`", r"<code>\1</code>", escaped)
 
 
+def option_html(option: dict) -> str:
+    """Option label with its description on the next line (empty descriptions are skipped)."""
+    label = html.escape(option["label"])
+    description = option.get("description") or ""
+    if not description:
+        return label
+    return f"{label}<br><i>{_inline_code(html.escape(description))}</i>"
+
+
 def format_text(text: str) -> str:
     """Render plain text as paragraphs, turning fenced/inline code into code blocks."""
     source = str(text)
@@ -476,12 +487,12 @@ def build_prompt(header: str, field: dict, context: str, reply_required: bool, c
             blocks.append("<p>Select options:</p>")
             blocks.append("<ul>")
             for option in field["options"]:
-                blocks.append(f'<li><input type="checkbox">{e(option["label"])}</li>')
+                blocks.append(f'<li><input type="checkbox">{option_html(option)}</li>')
             blocks.append("</ul>")
         else:
             blocks.append("<ol>")
             for option in field["options"]:
-                blocks.append(f"<li>{e(option['label'])}</li>")
+                blocks.append(f"<li>{option_html(option)}</li>")
             blocks.append("</ol>")
     if field["type"] == "boolean":
         blocks.append('<p>Answer "yes" or "no".</p>')
@@ -1179,6 +1190,17 @@ def selfcheck() -> int:
     check("prompt-inline-code", "<code>npm test</code>" in build_prompt("Run `npm test`", optional, "", False), True)
     check("prompt-reply-hint", "Reply" in build_prompt("Question", optional, "", True), True)
     check("prompt-no-reply-hint", "Reply" in build_prompt("Question", optional, "", False), False)
+
+    described = normalize_fields(
+        [{"key": "k", "options": [{"label": "Fast", "value": "fast", "description": "Uses `say`, ~2 min"}]}]
+    )[0]
+    check("option-description", described["options"][0]["description"], "Uses `say`, ~2 min")
+    check(
+        "prompt-option-description",
+        "<li>Fast<br><i>Uses <code>say</code>, ~2 min</i></li>" in build_prompt("Pick", described, "", False),
+        True,
+    )
+    check("prompt-option-no-empty-italic", "<i></i>" in build_prompt("Pick", choice, "", False), False)
 
     external = normalize_fields([{"key": "u", "type": "external", "external": True, "url": "https://x.y"}])[0]
     check("external-url", "https://x.y" in build_prompt("OAuth", external, "", False), True)
