@@ -46,7 +46,7 @@ const TIMEOUT_NOTE = `No answer in Telegram within ${Math.round(TIMEOUT_SEC / 60
 
 // "Task done" message: on unless TG_ASK_DONE_NOTIFY says otherwise.
 const DONE_NOTIFY = !/^(no|0|false|off)$/i.test(envValue("TG_ASK_DONE_NOTIFY") || "yes")
-const DONE_MAX_CHARS = 3500 // longer answers are cut so the notice stays one message
+const DONE_MAX_CHARS = 20000 // safety cap; the script packs whole sections into messages
 
 type AskField = Record<string, unknown>
 type AskResult = {

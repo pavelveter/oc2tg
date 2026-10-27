@@ -186,12 +186,13 @@ class Telegram:
             raise TgError(f"{method}: {payload.get('description') or payload}")
         return payload.get("result")
 
-    def send(self, text: str, keyboard: list[list[dict]] | None = None, markdown: bool = False) -> list[int]:
+    def send(self, text: str, keyboard: list[list[dict]] | None = None, markdown: bool = False, splitter=None) -> list[int]:
         """Send text (with or without keyboard), return ids of sent messages.
 
         markdown=True sends the text as rich-message Markdown instead of HTML.
+        splitter overrides the default line-based split (e.g. section-aware).
         """
-        parts = split_message(text)
+        parts = (splitter or split_message)(text)
         message_ids = []
         for index, part in enumerate(parts):
             params: dict = {
@@ -265,25 +266,63 @@ UPDATES = ["message", "callback_query"]
 
 
 # --- texts, buttons, parsing replies ---------------------------------------
-def split_message(text: str) -> list[str]:
+def split_message(text: str, limit: int = PART_LIMIT) -> list[str]:
     """Split text into parts under Telegram's limit, preferably on line boundaries."""
     parts: list[str] = []
     rest = text.strip()
     while rest and len(parts) < MAX_PARTS:
-        if len(rest) <= PART_LIMIT:
+        if len(rest) <= limit:
             parts.append(rest)
             break
-        cut = rest.rfind("\n", 0, PART_LIMIT)
-        if cut < PART_LIMIT // 2:
-            cut = rest.rfind(" ", 0, PART_LIMIT)
-        if cut < PART_LIMIT // 2:
-            cut = PART_LIMIT
+        cut = rest.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = rest.rfind(" ", 0, limit)
+        if cut < limit // 2:
+            cut = limit
         parts.append(rest[:cut].rstrip())
         rest = rest[cut:].lstrip()
     if rest and parts:
-        parts[-1] = parts[-1][: PART_LIMIT - 1] + "…"
-    return parts or [""]
+        parts[-1] = parts[-1][: limit - 1] + "…"
+    return parts or [""] 
+ 
+def split_sections(text: str, limit: int = PART_LIMIT, max_parts: int = MAX_PARTS) -> list[str]:
+    """Pack whole Markdown sections (heading to next heading) into messages.
 
+    A section is never split between messages unless it is itself bigger than
+    `limit`, in which case it falls back to split_message. At most `max_parts`
+    messages are produced; anything left over is folded into the last one.
+    """
+    sections = re.split(r"(?m)^(?=#{1,6} )", text.strip())
+    packed: list[str] = []
+    current = ""
+    for raw in sections:
+        piece = raw.strip()
+        if not piece:
+            continue
+        if current and len(current) + len(piece) + 2 > limit:
+            packed.append(current)
+            current = piece
+        else:
+            current = f"{current}\n\n{piece}" if current else piece
+    if current:
+        packed.append(current)
+    # a single oversized section: split it on line boundaries
+    parts: list[str] = []
+    for piece in packed:
+        if len(piece) <= limit:
+            parts.append(piece)
+        else:
+            parts.extend(split_message(piece, limit=limit))
+    # cap the number of messages
+    if len(parts) > max_parts:
+        overflow = parts[max_parts:]
+        parts = parts[:max_parts]
+        tail = "\n\n".join(overflow)
+        if len(parts[-1]) + len(tail) + 2 <= limit:
+            parts[-1] = f"{parts[-1]}\n\n{tail}"
+        else:
+            parts[-1] = parts[-1][: limit - 1] + "…"
+    return parts or [text.strip()]
 
 def normalize_fields(raw: object) -> list[dict]:
     """Validate and coerce the field description from the plugin into internal form."""
@@ -1135,7 +1174,7 @@ def main(argv: list[str]) -> int:
             if not text:
                 raise TgError("nothing to send")
             body = build_done(str(request.get("title") or "").strip(), text)
-            message_ids = telegram.send(body, markdown=True)
+            message_ids = telegram.send(body, markdown=True, splitter=split_sections)
             log_event(kind="done", message_ids=message_ids)
             return emit({"ok": True, "message_ids": message_ids, "message_id": message_ids[0]})
         raw_request = sys.stdin.read()
