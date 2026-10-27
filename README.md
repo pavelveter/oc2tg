@@ -99,6 +99,8 @@ folder are picked up by OpenCode automatically and reloaded on file change.
 
 ## `.env` setup
 
+The template is `.env.example` — `install.sh` copies it to `.env` on first run:
+
 ```ini
 TELEGRAM_BOT_TOKEN=123456:AA...   # bot token from @BotFather
 TELEGRAM_CHAT_ID=123456789        # where to write; your id via --whoami
@@ -182,7 +184,7 @@ That the plugin loaded is visible in `~/.local/share/opencode/log/opencode.log`:
 | `tg-ask.py` | all Telegram work: dialog, buttons, reply parsing, timeouts, diagnostics |
 | `tg-ask.ts` | OpenCode plugin: `form.created` and `permission.asked` → script, reply → session |
 | `install.sh` | install plugin into OpenCode and checks |
-| `.env` | token and chat (in `.gitignore`) |
+| `.env` / `.env.example` | token and chat (`.env` is in `.gitignore`, `.env.example` is the template) |
 | `tg-ask.log`, `.tg-ask.lock`, `.tg-ask.daemon.lock` | log and locks (generated, in `.gitignore`) |
 | `tg-ask.state.json`, `tg-ask.sock` | coordinator state and Unix socket (generated, in `.gitignore`) |
 

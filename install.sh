@@ -47,23 +47,9 @@ fail() {
 command -v "$PYTHON" >/dev/null 2>&1 || fail "$PYTHON not found (set TG_ASK_PYTHON=/path/to/python3)"
 
 if [ ! -f "$DIR/.env" ]; then
+  [ -f "$DIR/.env.example" ] || fail "missing $DIR/.env.example"
   umask 077
-  cat >"$DIR/.env" <<'EOF'
-# Bot token from @BotFather
-TELEGRAM_BOT_TOKEN=
-# Where to send questions and read answers from: personal chat id or group id (-100...)
-# Your id is shown by: python3 tg-ask.py --whoami
-TELEGRAM_CHAT_ID=
-# (optional) forum topic id (message_thread_id) to send into a specific topic
-TELEGRAM_THREAD_ID=
-# (optional) tunables, seconds; invalid values fall back to the default
-TG_ASK_TIMEOUT=900
-TG_ASK_IDLE_TIMEOUT=60
-TG_ASK_HTTP_TIMEOUT=30
-TG_ASK_POLL_TIMEOUT=20
-TG_ASK_MAX_ATTEMPTS=3
-TG_ASK_MAX_INPUTS=25
-EOF
+  cp "$DIR/.env.example" "$DIR/.env"
   echo "• created $DIR/.env — fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (see README.md)"
 fi
 
