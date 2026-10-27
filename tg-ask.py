@@ -3,6 +3,7 @@
 
 Modes:
   notify <text>   send a message; stdout one JSON line: {"ok":true,"message_id":N}
+  done            JSON {"title","text"} on stdin: "task done" message (title + answer text)
   ask              JSON request on stdin, JSON response on stdout (see below)
   --daemon         run the ephemeral coordinator (owns Telegram polling)
   --selfcheck      offline checks (no network)
@@ -530,6 +531,15 @@ def build_prompt(header: str, field: dict, context: str, reply_required: bool, c
         blocks.append('<p>To skip — send "-".</p>')
     if reply_required and (not field["options"] or field["custom"]):
         blocks.append("<p>Bot can't see regular messages in this group: reply by swiping (Reply) to this message.</p>")
+    return "\n".join(blocks)
+
+
+def build_done(title: str, text: str) -> str:
+    """Render the "task done" message: session title as sub-header, answer text below."""
+    blocks = ["<h2>🤖 OpenCode</h2>"]
+    if title:
+        blocks.append(f"<h3>{html.escape(title)}</h3>")
+    blocks.append(format_text(text))
     return "\n".join(blocks)
 
 
@@ -1072,7 +1082,7 @@ def daemon_main() -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="tg-ask.py", description=__doc__)
-    parser.add_argument("mode", nargs="?", choices=["notify", "ask"], help="notify | ask")
+    parser.add_argument("mode", nargs="?", choices=["notify", "done", "ask"], help="notify | done | ask")
     parser.add_argument("text", nargs="*", help="text for notify mode")
     parser.add_argument("--daemon", action="store_true", help="run the ephemeral coordinator")
     parser.add_argument("--selfcheck", action="store_true", help="offline checks")
@@ -1099,6 +1109,21 @@ def main(argv: list[str]) -> int:
                 raise TgError("nothing to send")
             message_ids = telegram.send(body)
             log_event(kind="notify", message_ids=message_ids)
+            return emit({"ok": True, "message_ids": message_ids, "message_id": message_ids[0]})
+        if args.mode == "done":
+            raw_request = sys.stdin.read()
+            try:
+                request = json.loads(raw_request) if raw_request.strip() else {}
+            except ValueError as error:
+                raise TgError(f"invalid JSON request: {error}") from error
+            if not isinstance(request, dict):
+                raise TgError("request must be a JSON object")
+            text = str(request.get("text") or "").strip()
+            if not text:
+                raise TgError("nothing to send")
+            body = build_done(str(request.get("title") or "").strip(), text)
+            message_ids = telegram.send(body)
+            log_event(kind="done", message_ids=message_ids)
             return emit({"ok": True, "message_ids": message_ids, "message_id": message_ids[0]})
         raw_request = sys.stdin.read()
         try:
@@ -1234,6 +1259,13 @@ def selfcheck() -> int:
         True,
     )
     check("prompt-option-no-empty-italic", "<i></i>" in build_prompt("Pick", choice, "", False), False)
+
+    done = build_done("Fix spacing", "Changed `option_html`.\n\n```\nls\n```")
+    check("done-title", "<h3>Fix spacing</h3>" in done, True)
+    check("done-text", "Changed <code>option_html</code>." in done, True)
+    check("done-code-block", "<pre><code>ls</code></pre>" in done, True)
+    check("done-escapes-html", "&lt;b&gt;x&lt;/b&gt;" in build_done("", "<b>x</b>"), True)
+    check("done-no-title", "<h3>" not in build_done("", "text"), True)
 
     external = normalize_fields([{"key": "u", "type": "external", "external": True, "url": "https://x.y"}])[0]
     check("external-url", "https://x.y" in build_prompt("OAuth", external, "", False), True)
