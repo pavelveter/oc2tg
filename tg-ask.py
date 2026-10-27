@@ -457,12 +457,15 @@ def _inline_code(escaped: str) -> str:
 
 
 def option_html(option: dict) -> str:
-    """Option label with its description after a blank line (empty descriptions are skipped)."""
+    """Option label with its description on the next line (empty descriptions are skipped).
+
+    The blank line after the description keeps it from running into the next list item.
+    """
     label = html.escape(option["label"])
     description = option.get("description") or ""
     if not description:
         return label
-    return f"{label}<br><br><i>{_inline_code(html.escape(description))}</i>"
+    return f"{label}<br><i>{_inline_code(html.escape(description))}</i><br><br>"
 
 
 def format_text(text: str) -> str:
@@ -501,6 +504,7 @@ def build_prompt(header: str, field: dict, context: str, reply_required: bool, c
             blocks.append(f'<p><a href="{html.escape(url, quote=True)}">{e(url)}</a></p>')
         return "\n".join(blocks)
     if field["options"]:
+        blocks.append("<br>")  # line break so the list does not sit on the question text
         if field["type"] == "multiselect":
             blocks.append("<p>Select options:</p>")
             blocks.append("<ul>")
@@ -1211,6 +1215,7 @@ def selfcheck() -> int:
     prompt = build_prompt("Permission required: shell", choice, "project", True)
     check("prompt-options", "<li>Yes</li>" in prompt and "<li>No</li>" in prompt and "Press a button" in prompt, True)
     check("prompt-heading", "<p>Permission required: shell</p>" in prompt, True)
+    check("prompt-list-break", "<p>Permission required: shell</p>\n<br>\n<ol>" in prompt, True)
     check("prompt-rich-header", "<h2>🤖 OpenCode</h2>" in prompt and "<h3>project</h3>" in prompt, True)
     check("prompt-checklist", '<input type="checkbox">' in build_prompt("Pick", multi, "project", False), True)
     check("prompt-code", "<pre><code>echo hi</code></pre>" in build_prompt("Run", optional, "", False, "echo hi"), True)
@@ -1225,7 +1230,7 @@ def selfcheck() -> int:
     check("option-description", described["options"][0]["description"], "Uses `say`, ~2 min")
     check(
         "prompt-option-description",
-        "<li>Fast<br><br><i>Uses <code>say</code>, ~2 min</i></li>" in build_prompt("Pick", described, "", False),
+        "<li>Fast<br><i>Uses <code>say</code>, ~2 min</i><br><br></li>" in build_prompt("Pick", described, "", False),
         True,
     )
     check("prompt-option-no-empty-italic", "<i></i>" in build_prompt("Pick", choice, "", False), False)
