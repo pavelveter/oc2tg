@@ -457,12 +457,12 @@ def _inline_code(escaped: str) -> str:
 
 
 def option_html(option: dict) -> str:
-    """Option label with its description on the next line (empty descriptions are skipped)."""
+    """Option label with its description after a blank line (empty descriptions are skipped)."""
     label = html.escape(option["label"])
     description = option.get("description") or ""
     if not description:
         return label
-    return f"{label}<br><i>{_inline_code(html.escape(description))}</i>"
+    return f"{label}<br><br><i>{_inline_code(html.escape(description))}</i>"
 
 
 def format_text(text: str) -> str:
@@ -1225,7 +1225,7 @@ def selfcheck() -> int:
     check("option-description", described["options"][0]["description"], "Uses `say`, ~2 min")
     check(
         "prompt-option-description",
-        "<li>Fast<br><i>Uses <code>say</code>, ~2 min</i></li>" in build_prompt("Pick", described, "", False),
+        "<li>Fast<br><br><i>Uses <code>say</code>, ~2 min</i></li>" in build_prompt("Pick", described, "", False),
         True,
     )
     check("prompt-option-no-empty-italic", "<i></i>" in build_prompt("Pick", choice, "", False), False)
