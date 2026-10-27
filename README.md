@@ -11,6 +11,7 @@ when you're away from the terminal.
 | Question via the `question` tool | question with buttons | press a button, or reply with text |
 | Tool permission request | three buttons: once / always / reject | press a button |
 | `ask_user_via_telegram` tool | free-form text question | reply with text |
+| run finishes ("task done") | session title + the final answer text | no reply needed |
 | `python3 tg-ask.py notify "…"` | just a notification | no reply needed |
 
 How the reply looks in Telegram — the original question stays in place, the answer is appended below:
@@ -30,7 +31,8 @@ Keep the supergroup?
 ## Rich messages
 
 Prompts use Telegram's rich message API (`sendRichMessage` / `rich_message.html`)
-and are edited in place:
+and are edited in place; "task done" notices use the same API with `rich_message.markdown`,
+so headings, tables, lists and code blocks from the answer render natively.
 
 - `<h2>🤖 OpenCode</h2>` header plus a session sub-header;
 - the question itself is ordinary text;
@@ -108,6 +110,9 @@ TELEGRAM_CHAT_ID=123456789        # where to write; your id via --whoami
 
 Environment variables `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` take priority over `.env`.
 
+`TG_ASK_DONE_NOTIFY` (default `YES`) sends the final answer to Telegram when a run finishes;
+`NO` turns it off.
+
 Optional tunables in the same `.env` (seconds; invalid or non-positive values fall back
 to the default):
 
@@ -143,6 +148,11 @@ you can disable the mode in BotFather (`/setprivacy` → Disable).
   On expiry the form is cancelled, the permission is rejected, the session keeps running.
 - **Reply in the terminal cancels the TG dialog**: the child process is stopped, the lock is
   released, the message stays in Telegram as history.
+- **Task done.** When a run finishes, the session title and the final answer text go to
+  Telegram as rich Markdown — headings, tables, lists, quotes and code blocks render as such
+  (answers longer than 3500 characters are cut). Enabled by default, `TG_ASK_DONE_NOTIFY=NO`
+  turns it off. Each answer is sent once, even if the event fires again; subagent sessions and
+  sessions of other directories are left to their own reporter.
 
 ## Checks and diagnostics
 

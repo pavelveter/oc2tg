@@ -44,6 +44,10 @@ const TIMEOUT_SEC = CONFIGURED_TIMEOUT > 0 ? CONFIGURED_TIMEOUT : 900 // how lon
 const GRACE_SEC = 60 // margin before forcibly ending the dialog
 const TIMEOUT_NOTE = `No answer in Telegram within ${Math.round(TIMEOUT_SEC / 60)} minutes.`
 
+// "Task done" message: on unless TG_ASK_DONE_NOTIFY says otherwise.
+const DONE_NOTIFY = !/^(no|0|false|off)$/i.test(envValue("TG_ASK_DONE_NOTIFY") || "yes")
+const DONE_MAX_CHARS = 3500 // longer answers are cut so the notice stays one message
+
 type AskField = Record<string, unknown>
 type AskResult = {
   ok: boolean
@@ -162,6 +166,20 @@ async function opencodeApi(
   return { ok: true, error: "" }
 }
 
+// Text of a session message; empty when it has no text parts (tool calls, etc.).
+function messageText(message: any): string {
+  const content = Array.isArray(message?.content) ? message.content : []
+  return content
+    .filter((part: any) => part?.type === "text")
+    .map((part: any) => String(part?.text ?? ""))
+    .filter((text: string) => text.trim().length > 0)
+    .join("\n\n")
+}
+
+function sessionIDFrom(data: any): string {
+  return String(data?.sessionID ?? "")
+}
+
 function toAskField(field: Record<string, unknown>): AskField | undefined {
   if (!field || typeof field !== "object" || field.hidden === true) return undefined
   const key = String(field.key ?? "")
@@ -217,6 +235,7 @@ export default Plugin.define({
     const abort = new AbortController()
     const running = new Map<string, Dialog>()
     const settled = new Set<string>()
+    const notified = new Set<string>() // message ids already reported as "task done"
 
     const finish = (id: string) => {
       const dialog = running.get(id)
@@ -345,6 +364,45 @@ export default Plugin.define({
       }
     }
 
+    const handleDone = async (sessionID: string) => {
+      let title = ""
+      try {
+        const info = await ctx.session.get({ sessionID })
+        const directory = info?.location?.directory
+        // the plugin loads one instance per location: other directories have their own
+        if (directory && ctx.location?.directory && directory !== ctx.location.directory) return
+        if (info?.parentID) return // subagent session: its parent reports the task
+        title = String(info?.title ?? "")
+      } catch (error) {
+        logEvent({ kind: "done-session-failed", sessionID, error: String(error) })
+        return
+      }
+      let messages: any[]
+      try {
+        messages = [...((await ctx.session.context({ sessionID })) ?? [])]
+      } catch (error) {
+        logEvent({ kind: "done-context-failed", sessionID, error: String(error) })
+        return
+      }
+      const last = messages.reverse().find((message) => message?.type === "assistant" && messageText(message))
+      const messageID = String(last?.id ?? "")
+      if (!messageID || notified.has(messageID)) return
+      const full = messageText(last)
+      const text = full.length > DONE_MAX_CHARS ? `${full.slice(0, DONE_MAX_CHARS).trimEnd()}…` : full
+      notified.add(messageID)
+      const result = await runProcess(PYTHON, [SCRIPT, "done"], {
+        stdin: JSON.stringify({ title, text }),
+        abort: abort.signal,
+        limitSec: 60,
+      })
+      if (result.code === 0) {
+        logEvent({ kind: "done-notified", sessionID, messageID, chars: text.length })
+      } else {
+        const error = (result.stderr || result.note || `exit ${result.code}`).trim().slice(0, 200)
+        logEvent({ kind: "done-failed", sessionID, messageID, error })
+      }
+    }
+
     try {
       await ctx.tool.transform((editor: any) => {
         editor.add({
@@ -405,6 +463,14 @@ export default Plugin.define({
             void handlePermission(data, directory).catch((error) =>
               logEvent({ kind: "permission-crashed", id, error: String(error) }),
             )
+          } else if (type === "session.execution.succeeded") {
+            if (!DONE_NOTIFY) continue
+            const sessionID = sessionIDFrom(data)
+            if (!sessionID) {
+              logEvent({ kind: "done-unknown-shape", keys: Object.keys(data ?? {}) })
+              continue
+            }
+            void handleDone(sessionID).catch((error) => logEvent({ kind: "done-crashed", error: String(error) }))
           } else if (type === "permission.replied") {
             finish(String(data.requestID ?? ""))
           }
