@@ -31,7 +31,8 @@ Keep the supergroup?
 ## Rich messages
 
 Prompts use Telegram's rich message API (`sendRichMessage` / `rich_message.html`)
-and are edited in place:
+and are edited in place; "task done" notices use the same API with `rich_message.markdown`,
+so headings, tables, lists and code blocks from the answer render natively.
 
 - `<h2>🤖 OpenCode</h2>` header plus a session sub-header;
 - the question itself is ordinary text;
@@ -148,7 +149,8 @@ you can disable the mode in BotFather (`/setprivacy` → Disable).
 - **Reply in the terminal cancels the TG dialog**: the child process is stopped, the lock is
   released, the message stays in Telegram as history.
 - **Task done.** When a run finishes, the session title and the final answer text go to
-  Telegram (answers longer than 3500 characters are cut). Enabled by default, `TG_ASK_DONE_NOTIFY=NO`
+  Telegram as rich Markdown — headings, tables, lists, quotes and code blocks render as such
+  (answers longer than 3500 characters are cut). Enabled by default, `TG_ASK_DONE_NOTIFY=NO`
   turns it off. Each answer is sent once, even if the event fires again; subagent sessions and
   sessions of other directories are left to their own reporter.
 

@@ -186,12 +186,18 @@ class Telegram:
             raise TgError(f"{method}: {payload.get('description') or payload}")
         return payload.get("result")
 
-    def send(self, text: str, keyboard: list[list[dict]] | None = None) -> list[int]:
-        """Send text (with or without keyboard), return ids of sent messages."""
+    def send(self, text: str, keyboard: list[list[dict]] | None = None, markdown: bool = False) -> list[int]:
+        """Send text (with or without keyboard), return ids of sent messages.
+
+        markdown=True sends the text as rich-message Markdown instead of HTML.
+        """
         parts = split_message(text)
         message_ids = []
         for index, part in enumerate(parts):
-            params: dict = {"chat_id": self.chat_id, "rich_message": {"html": part}}
+            params: dict = {
+                "chat_id": self.chat_id,
+                "rich_message": {"markdown": part} if markdown else {"html": part},
+            }
             if self.thread_id:
                 try:
                     params["message_thread_id"] = int(self.thread_id)
@@ -534,13 +540,20 @@ def build_prompt(header: str, field: dict, context: str, reply_required: bool, c
     return "\n".join(blocks)
 
 
+def markdown_safe(text: str) -> str:
+    """Escape raw HTML outside code, because Telegram parses HTML inside markdown too."""
+    parts = re.split(r"(```.*?```|`[^`\n]+`)", text, flags=re.S)
+    return "".join(part if part.startswith("`") else part.replace("<", "&lt;") for part in parts)
+
+
 def build_done(title: str, text: str) -> str:
-    """Render the "task done" message: session title as sub-header, answer text below."""
-    blocks = ["<h2>🤖 OpenCode</h2>"]
+    """Render the "task done" message as rich Markdown: heading, session title, answer."""
+    blocks = ["# 🤖 OpenCode"]
     if title:
-        blocks.append(f"<h3>{html.escape(title)}</h3>")
-    blocks.append(format_text(text))
-    return "\n".join(blocks)
+        escaped = re.sub(r"([*_`\[\]#|])", r"\\\1", title)  # keep markdown out of the title
+        blocks.append(f"## {escaped}")
+    blocks.append(markdown_safe(text))
+    return "\n\n".join(blocks)
 
 
 def label_for(field: dict, value: object) -> str:
@@ -1122,7 +1135,7 @@ def main(argv: list[str]) -> int:
             if not text:
                 raise TgError("nothing to send")
             body = build_done(str(request.get("title") or "").strip(), text)
-            message_ids = telegram.send(body)
+            message_ids = telegram.send(body, markdown=True)
             log_event(kind="done", message_ids=message_ids)
             return emit({"ok": True, "message_ids": message_ids, "message_id": message_ids[0]})
         raw_request = sys.stdin.read()
@@ -1260,12 +1273,14 @@ def selfcheck() -> int:
     )
     check("prompt-option-no-empty-italic", "<i></i>" in build_prompt("Pick", choice, "", False), False)
 
-    done = build_done("Fix spacing", "Changed `option_html`.\n\n```\nls\n```")
-    check("done-title", "<h3>Fix spacing</h3>" in done, True)
-    check("done-text", "Changed <code>option_html</code>." in done, True)
-    check("done-code-block", "<pre><code>ls</code></pre>" in done, True)
-    check("done-escapes-html", "&lt;b&gt;x&lt;/b&gt;" in build_done("", "<b>x</b>"), True)
-    check("done-no-title", "<h3>" not in build_done("", "text"), True)
+    done = build_done("Fix spacing", "Changed `option_html`.\n\n```\nls\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |")
+    check("done-title", "## Fix spacing" in done, True)
+    check("done-text", "Changed `option_html`." in done, True)
+    check("done-code-block", "```\nls\n```" in done, True)
+    check("done-table", "|---|---|" in done, True)
+    check("done-escapes-html", "&lt;b>x&lt;/b>" in build_done("", "<b>x</b>"), True)
+    check("done-keeps-code-html", "`<div>`" in build_done("", "inline `<div>` here"), True)
+    check("done-escapes-title", "## Fix\\_spacing" in build_done("Fix_spacing", "text"), True)
 
     external = normalize_fields([{"key": "u", "type": "external", "external": True, "url": "https://x.y"}])[0]
     check("external-url", "https://x.y" in build_prompt("OAuth", external, "", False), True)
