@@ -149,10 +149,11 @@ you can disable the mode in BotFather (`/setprivacy` → Disable).
 - **Reply in the terminal cancels the TG dialog**: the child process is stopped, the lock is
   released, the message stays in Telegram as history.
 - **Task done.** When a run finishes, the session title and the final answer text go to
-  Telegram as rich Markdown — headings, tables, lists, quotes and code blocks render as such
-  (answers longer than 3500 characters are cut). Enabled by default, `TG_ASK_DONE_NOTIFY=NO`
-  turns it off. Each answer is sent once, even if the event fires again; subagent sessions and
-  sessions of other directories are left to their own reporter.
+  Telegram as rich Markdown — headings, tables, lists, quotes and code blocks render as such.
+  When the answer does not fit, whole sections continue in the next message (at most 6).
+  Enabled by default, `TG_ASK_DONE_NOTIFY=NO` turns it off. Each answer is sent once, even
+  if the event fires again; subagent sessions and sessions of other directories are left to
+  their own reporter.
 
 ## Checks and diagnostics
 
