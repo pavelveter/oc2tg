@@ -106,6 +106,22 @@ TELEGRAM_CHAT_ID=123456789        # where to write; your id via --whoami
 
 Environment variables `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` take priority over `.env`.
 
+Optional tunables in the same `.env` (seconds; invalid or non-positive values fall back
+to the default):
+
+```ini
+TG_ASK_TIMEOUT=900        # how long to wait for a reply in Telegram
+TG_ASK_IDLE_TIMEOUT=60    # daemon exits after this much idleness
+TG_ASK_HTTP_TIMEOUT=30    # one Telegram API request
+TG_ASK_POLL_TIMEOUT=20    # getUpdates long poll
+TG_ASK_MAX_ATTEMPTS=3     # attempts to parse a text answer
+TG_ASK_MAX_INPUTS=25      # guard against an endless button loop
+```
+
+Both ends read them: the plugin takes `TG_ASK_TIMEOUT` for its own deadline, the script
+the rest. A running daemon picks up changes on its next start (it exits after
+`TG_ASK_IDLE_TIMEOUT` of inactivity).
+
 **Which chat to pick.** A personal chat is more reliable: there text and buttons work
 without limits. In a group the bot has Privacy mode on by default — it only sees
 commands and **replies (Reply) to its own messages**, so plain text never reaches it
@@ -120,7 +136,8 @@ you can disable the mode in BotFather (`/setprivacy` → Disable).
   numbers (for `number`/`integer`), "comma-separated options" for multiselect. Trailing text
   after an unambiguous choice is returned as `answers["<field>_note"]` — e.g. "3 because dangerous"
   becomes `reject` + reason.
-- **Timeout** — 15 minutes (`TIMEOUT_SEC` in `tg-ask.ts`, `DEFAULT_TIMEOUT` in `tg-ask.py`).
+- **Timeout** — 15 minutes by default; `TG_ASK_TIMEOUT` in `.env` (read by both `tg-ask.ts`
+  and `tg-ask.py`, default 900 s).
   On expiry the form is cancelled, the permission is rejected, the session keeps running.
 - **Reply in the terminal cancels the TG dialog**: the child process is stopped, the lock is
   released, the message stays in Telegram as history.

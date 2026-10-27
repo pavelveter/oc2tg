@@ -65,14 +65,9 @@ MAX_EDIT = 3900  # margin under Telegram's 4096-char edit limit
 CHECKED = "✅"
 UNCHECKED = "⬜️"
 DONE_LABEL = "Done"
-DEFAULT_TIMEOUT = 900.0
-POLL_TIMEOUT = 30
 PART_LIMIT = 3500  # margin under Telegram's 4096-char limit
 MAX_PARTS = 6
 MAX_FIELDS = 20
-MAX_ATTEMPTS = 3
-MAX_INPUTS = 25  # guard against infinite loop on a single button form
-IDLE_TIMEOUT = 60.0
 TRUE_WORDS = {"y", "yes", "true", "t", "1", "+", "ok", "yeah", "yep"}
 FALSE_WORDS = {"n", "no", "false", "f", "0", "-", "nope"}
 SKIP_WORDS = {"-", "skip", "pass", "none"}
@@ -124,6 +119,29 @@ def env_values() -> dict[str, str]:
         if from_env:
             values[key] = from_env
     return values
+
+
+def env_value(key: str) -> str:
+    """Environment variable wins over .env next to the script."""
+    return (os.environ.get(key) or env_values().get(key) or "").strip()
+
+
+def env_number(key: str, default: float) -> float:
+    """Positive number from env; empty, invalid or non-positive — default."""
+    try:
+        value = float(env_value(key))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# --- tunables from .env ----------------------------------------------------
+DEFAULT_TIMEOUT = env_number("TG_ASK_TIMEOUT", 900.0)  # wait for a reply, seconds
+IDLE_TIMEOUT = env_number("TG_ASK_IDLE_TIMEOUT", 60.0)  # daemon exits after this idleness
+HTTP_TIMEOUT = env_number("TG_ASK_HTTP_TIMEOUT", 30.0)  # one Telegram API request
+POLL_TIMEOUT = max(1, int(env_number("TG_ASK_POLL_TIMEOUT", 20)))  # getUpdates long poll
+MAX_ATTEMPTS = max(1, int(env_number("TG_ASK_MAX_ATTEMPTS", 3)))
+MAX_INPUTS = max(1, int(env_number("TG_ASK_MAX_INPUTS", 25)))  # guard against infinite button loop
 
 
 def credentials() -> tuple[str, str]:
@@ -182,7 +200,7 @@ class Telegram:
                 # keyboard attaches to the last part, otherwise to the message without options
                 if index == len(parts) - 1:
                     params["reply_markup"] = {"inline_keyboard": keyboard}
-            result = self.call("sendRichMessage", params, 30)
+            result = self.call("sendRichMessage", params, HTTP_TIMEOUT)
             assert isinstance(result, dict)
             message_ids.append(int(result["message_id"]))
         return message_ids
@@ -200,7 +218,7 @@ class Telegram:
                 params["message_thread_id"] = int(self.thread_id)
             except (TypeError, ValueError):
                 pass
-        self.call("editMessageText", params, 15)
+        self.call("editMessageText", params, HTTP_TIMEOUT)
 
     def best_effort(self, what: str, function, *args) -> None:
         try:
@@ -209,17 +227,17 @@ class Telegram:
             log_event(kind=f"{what}-failed", error=str(error))
 
     def react(self, message_id: int, emoji: str) -> None:
-        self.best_effort("react", self.call, "setMessageReaction", {"chat_id": self.chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}, 15)
+        self.best_effort("react", self.call, "setMessageReaction", {"chat_id": self.chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}, HTTP_TIMEOUT)
 
     def answer_button(self, callback_id: str, note: str = "") -> None:
-        self.best_effort("answer-button", self.call, "answerCallbackQuery", {"callback_query_id": callback_id, "text": note[:200]}, 15)
+        self.best_effort("answer-button", self.call, "answerCallbackQuery", {"callback_query_id": callback_id, "text": note[:200]}, HTTP_TIMEOUT)
 
     def group_privacy_on(self) -> bool:
         """In a group with Privacy mode, the bot only receives replies to its own messages (getMe)."""
         if not self.is_group:
             return False
         try:
-            me = self.call("getMe", {}, 15)
+            me = self.call("getMe", {}, HTTP_TIMEOUT)
             return not bool((me or {}).get("can_read_all_group_messages"))
         except TgError as error:
             log_event(kind="getme-failed", error=str(error))
@@ -229,7 +247,7 @@ class Telegram:
         """Drop accumulated updates, return offset for the next request."""
         offset = 0
         for _ in range(20):
-            updates = self.call("getUpdates", {"offset": offset, "timeout": 0, "limit": 100, "allowed_updates": UPDATES}, 30)
+            updates = self.call("getUpdates", {"offset": offset, "timeout": 0, "limit": 100, "allowed_updates": UPDATES}, HTTP_TIMEOUT)
             if not updates:
                 break
             offset = int(updates[-1]["update_id"]) + 1
@@ -777,7 +795,7 @@ def check() -> int:
     telegram = Telegram(token, chat_id)
     print(f"✓ .env: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID present ({SCRIPT_DIR / '.env'})")
     try:
-        me = telegram.call("getMe", {}, 15)
+        me = telegram.call("getMe", {}, HTTP_TIMEOUT)
     except TgError as error:
         print(f"✗ bot unavailable (network or token): {error}")
         return 1
@@ -854,7 +872,8 @@ def ensure_daemon() -> None:
 def daemon_request(request: dict) -> dict:
     ensure_daemon()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(300)
+    # the dialog deadline plus a margin: the daemon answers when the dialog ends
+    sock.settimeout(DEFAULT_TIMEOUT + 60)
     sock.connect(str(SOCKET_PATH))
     sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
     buf = b""
@@ -941,7 +960,7 @@ def daemon_main() -> int:
         offset = tg.drain()
         while not stop_event.is_set():
             try:
-                updates = tg.call("getUpdates", {"offset": offset, "timeout": 20, "limit": 10, "allowed_updates": UPDATES}, 40)
+                updates = tg.call("getUpdates", {"offset": offset, "timeout": POLL_TIMEOUT, "limit": 10, "allowed_updates": UPDATES}, POLL_TIMEOUT + 10)
             except TgError as error:
                 log_event(kind="poll-failed", error=str(error))
                 time.sleep(2)
@@ -1105,6 +1124,15 @@ def selfcheck() -> int:
             failures.append(f"{name}: got {got!r}, expected {expected!r}")
 
     check("env", parse_env('# c\nexport A = "x y"\nB=1\nbroken\n'), {"A": "x y", "B": "1"})
+
+    # tunables from env: valid value wins, junk and non-positive fall back to the default
+    os.environ["TG_ASK_SELFCHECK_KEY"] = "7.5"
+    check("tunable-env", env_number("TG_ASK_SELFCHECK_KEY", 1.0), 7.5)
+    os.environ["TG_ASK_SELFCHECK_KEY"] = "junk"
+    check("tunable-invalid", env_number("TG_ASK_SELFCHECK_KEY", 1.0), 1.0)
+    os.environ["TG_ASK_SELFCHECK_KEY"] = "-5"
+    check("tunable-non-positive", env_number("TG_ASK_SELFCHECK_KEY", 1.0), 1.0)
+    del os.environ["TG_ASK_SELFCHECK_KEY"]
 
     choice = normalize_fields(
         [{"key": "k", "type": "string", "options": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}]}]
