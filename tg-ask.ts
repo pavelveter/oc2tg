@@ -242,7 +242,8 @@ export default Plugin.define({
     const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const debounceGen = new Map<string, number>()
     const inFlight = new Set<string>()
-    const DONE_DEBOUNCE_MS = 2000
+    const DONE_DEBOUNCE_MS = 20000
+    const QUESTION_DEBOUNCE_MS = 1000
 
     const finish = (id: string) => {
       const dialog = running.get(id)
@@ -521,6 +522,17 @@ export default Plugin.define({
               continue
             }
             if (inFlight.has(sessionID)) continue
+            // Peek the last assistant message to decide how long to wait: question
+            // endings are delivered promptly, plain endings only after the
+            // session has been idle for a while (avoids per-turn spam).
+            let delay = DONE_DEBOUNCE_MS
+            try {
+              const msgs = [...((await ctx.session.context({ sessionID })) ?? [])]
+              const last = msgs.reverse().find((m: any) => m?.type === "assistant" && messageText(m))
+              if (last && messageText(last).trim().endsWith("?")) delay = QUESTION_DEBOUNCE_MS
+            } catch (error) {
+              logEvent({ kind: "done-peek-failed", sessionID, error: String(error) })
+            }
             const gen = (debounceGen.get(sessionID) ?? 0) + 1
             debounceGen.set(sessionID, gen)
             const prev = debounceTimers.get(sessionID)
@@ -532,7 +544,7 @@ export default Plugin.define({
               void handleDone(sessionID, gen)
                 .catch((error) => logEvent({ kind: "done-crashed", sessionID, error: String(error) }))
                 .finally(() => inFlight.delete(sessionID))
-            }, DONE_DEBOUNCE_MS)
+            }, delay)
             timer.unref?.()
             debounceTimers.set(sessionID, timer)
           } else if (type === "permission.replied") {
