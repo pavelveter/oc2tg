@@ -238,6 +238,11 @@ export default Plugin.define({
     const notified = new Set<string>() // message ids already reported as "task done"
     const interactiveRounds = new Map<string, number>() // per-session interactive "done" asks
     const MAX_INTERACTIVE_ROUNDS = 3
+    const sessionStatus = new Map<string, string>() // last known busy/idle/retry
+    const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const debounceGen = new Map<string, number>()
+    const inFlight = new Set<string>()
+    const DONE_DEBOUNCE_MS = 2000
 
     const finish = (id: string) => {
       const dialog = running.get(id)
@@ -366,7 +371,9 @@ export default Plugin.define({
       }
     }
 
-    const handleDone = async (sessionID: string) => {
+    const handleDone = async (sessionID: string, gen: number) => {
+      if (debounceGen.get(sessionID) !== gen) return // stale debounce
+      if (sessionStatus.get(sessionID) === "busy") return // not finished yet
       let title = ""
       let folder = ""
       try {
@@ -501,6 +508,11 @@ export default Plugin.define({
             void handlePermission(data, directory).catch((error) =>
               logEvent({ kind: "permission-crashed", id, error: String(error) }),
             )
+          } else if (type === "session.status") {
+            const sessionID = sessionIDFrom(data)
+            const status = (data?.status ?? data?.properties?.status)
+            const kind = typeof status === "string" ? status : String(status?.type ?? "")
+            if (sessionID && kind) sessionStatus.set(sessionID, kind)
           } else if (type === "session.execution.succeeded") {
             if (!DONE_NOTIFY) continue
             const sessionID = sessionIDFrom(data)
@@ -508,7 +520,21 @@ export default Plugin.define({
               logEvent({ kind: "done-unknown-shape", keys: Object.keys(data ?? {}) })
               continue
             }
-            void handleDone(sessionID).catch((error) => logEvent({ kind: "done-crashed", error: String(error) }))
+            if (inFlight.has(sessionID)) continue
+            const gen = (debounceGen.get(sessionID) ?? 0) + 1
+            debounceGen.set(sessionID, gen)
+            const prev = debounceTimers.get(sessionID)
+            if (prev) clearTimeout(prev)
+            const timer = setTimeout(() => {
+              debounceTimers.delete(sessionID)
+              if (inFlight.has(sessionID)) return
+              inFlight.add(sessionID)
+              void handleDone(sessionID, gen)
+                .catch((error) => logEvent({ kind: "done-crashed", sessionID, error: String(error) }))
+                .finally(() => inFlight.delete(sessionID))
+            }, DONE_DEBOUNCE_MS)
+            timer.unref?.()
+            debounceTimers.set(sessionID, timer)
           } else if (type === "permission.replied") {
             finish(String(data.requestID ?? ""))
           }
