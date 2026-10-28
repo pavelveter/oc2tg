@@ -236,6 +236,8 @@ export default Plugin.define({
     const running = new Map<string, Dialog>()
     const settled = new Set<string>()
     const notified = new Set<string>() // message ids already reported as "task done"
+    const interactiveRounds = new Map<string, number>() // per-session interactive "done" asks
+    const MAX_INTERACTIVE_ROUNDS = 3
 
     const finish = (id: string) => {
       const dialog = running.get(id)
@@ -366,6 +368,7 @@ export default Plugin.define({
 
     const handleDone = async (sessionID: string) => {
       let title = ""
+      let folder = ""
       try {
         const info = await ctx.session.get({ sessionID })
         const directory = info?.location?.directory
@@ -373,6 +376,7 @@ export default Plugin.define({
         if (directory && ctx.location?.directory && directory !== ctx.location.directory) return
         if (info?.parentID) return // subagent session: its parent reports the task
         title = String(info?.title ?? "")
+        folder = directory ? basename(directory) : ""
       } catch (error) {
         logEvent({ kind: "done-session-failed", sessionID, error: String(error) })
         return
@@ -390,8 +394,42 @@ export default Plugin.define({
       const full = messageText(last)
       const text = full.length > DONE_MAX_CHARS ? `${full.slice(0, DONE_MAX_CHARS).trimEnd()}…` : full
       notified.add(messageID)
+
+      // If the final answer ends with a question, make the Telegram notice
+      // interactive: wait for the user's reply and feed it back into the
+      // session so the run can continue instead of stopping at the question.
+      const endsWithQuestion = full.trim().endsWith("?")
+      const rounds = interactiveRounds.get(sessionID) ?? 0
+      if (endsWithQuestion && rounds < MAX_INTERACTIVE_ROUNDS) {
+        interactiveRounds.set(sessionID, rounds + 1)
+        const context = [folder, title].filter(Boolean).join(" · ")
+        logEvent({ kind: "done-ask", sessionID, messageID, round: rounds + 1 })
+        const result = await ask({ text, context }, abort.signal)
+        if (result.ok) {
+          const answer = String(result.answers?.answer ?? result.raw ?? "").trim()
+          if (answer) {
+            const replied = await opencodeApi(
+              "post",
+              `/session/${encodeURIComponent(sessionID)}/prompt_async`,
+              { parts: [{ type: "text", text: answer }] },
+              abort.signal,
+            )
+            logEvent({
+              kind: replied.ok ? "done-answer-injected" : "done-answer-inject-failed",
+              sessionID,
+              answerChars: answer.length,
+              error: replied.error,
+            })
+          }
+        } else {
+          logEvent({ kind: "done-ask-timeout", sessionID, reason: result.reason, error: result.error })
+        }
+        return
+      }
+
+      const doneTitle = folder && title ? `${folder} · ${title}` : folder || title
       const result = await runProcess(PYTHON, [SCRIPT, "done"], {
-        stdin: JSON.stringify({ title, text }),
+        stdin: JSON.stringify({ title: doneTitle, text }),
         abort: abort.signal,
         limitSec: 60,
       })
