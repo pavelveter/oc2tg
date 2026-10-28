@@ -236,6 +236,14 @@ export default Plugin.define({
     const running = new Map<string, Dialog>()
     const settled = new Set<string>()
     const notified = new Set<string>() // message ids already reported as "task done"
+    const interactiveRounds = new Map<string, number>() // per-session interactive "done" asks
+    const MAX_INTERACTIVE_ROUNDS = 3
+    const sessionStatus = new Map<string, string>() // last known busy/idle/retry
+    const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const debounceGen = new Map<string, number>()
+    const inFlight = new Set<string>()
+    const DONE_DEBOUNCE_MS = 20000
+    const QUESTION_DEBOUNCE_MS = 1000
 
     const finish = (id: string) => {
       const dialog = running.get(id)
@@ -364,8 +372,11 @@ export default Plugin.define({
       }
     }
 
-    const handleDone = async (sessionID: string) => {
+    const handleDone = async (sessionID: string, gen: number) => {
+      if (debounceGen.get(sessionID) !== gen) return // stale debounce
+      if (sessionStatus.get(sessionID) === "busy") return // not finished yet
       let title = ""
+      let folder = ""
       try {
         const info = await ctx.session.get({ sessionID })
         const directory = info?.location?.directory
@@ -373,6 +384,7 @@ export default Plugin.define({
         if (directory && ctx.location?.directory && directory !== ctx.location.directory) return
         if (info?.parentID) return // subagent session: its parent reports the task
         title = String(info?.title ?? "")
+        folder = directory ? basename(directory) : ""
       } catch (error) {
         logEvent({ kind: "done-session-failed", sessionID, error: String(error) })
         return
@@ -390,8 +402,42 @@ export default Plugin.define({
       const full = messageText(last)
       const text = full.length > DONE_MAX_CHARS ? `${full.slice(0, DONE_MAX_CHARS).trimEnd()}…` : full
       notified.add(messageID)
+
+      // If the final answer ends with a question, make the Telegram notice
+      // interactive: wait for the user's reply and feed it back into the
+      // session so the run can continue instead of stopping at the question.
+      const endsWithQuestion = full.trim().endsWith("?")
+      const rounds = interactiveRounds.get(sessionID) ?? 0
+      if (endsWithQuestion && rounds < MAX_INTERACTIVE_ROUNDS) {
+        interactiveRounds.set(sessionID, rounds + 1)
+        const context = [folder, title].filter(Boolean).join(" · ")
+        logEvent({ kind: "done-ask", sessionID, messageID, round: rounds + 1 })
+        const result = await ask({ text, context }, abort.signal)
+        if (result.ok) {
+          const answer = String(result.answers?.answer ?? result.raw ?? "").trim()
+          if (answer) {
+            const replied = await opencodeApi(
+              "post",
+              `/session/${encodeURIComponent(sessionID)}/prompt_async`,
+              { parts: [{ type: "text", text: answer }] },
+              abort.signal,
+            )
+            logEvent({
+              kind: replied.ok ? "done-answer-injected" : "done-answer-inject-failed",
+              sessionID,
+              answerChars: answer.length,
+              error: replied.error,
+            })
+          }
+        } else {
+          logEvent({ kind: "done-ask-timeout", sessionID, reason: result.reason, error: result.error })
+        }
+        return
+      }
+
+      const doneTitle = folder && title ? `${folder} · ${title}` : folder || title
       const result = await runProcess(PYTHON, [SCRIPT, "done"], {
-        stdin: JSON.stringify({ title, text }),
+        stdin: JSON.stringify({ title: doneTitle, text }),
         abort: abort.signal,
         limitSec: 60,
       })
@@ -463,6 +509,11 @@ export default Plugin.define({
             void handlePermission(data, directory).catch((error) =>
               logEvent({ kind: "permission-crashed", id, error: String(error) }),
             )
+          } else if (type === "session.status") {
+            const sessionID = sessionIDFrom(data)
+            const status = (data?.status ?? data?.properties?.status)
+            const kind = typeof status === "string" ? status : String(status?.type ?? "")
+            if (sessionID && kind) sessionStatus.set(sessionID, kind)
           } else if (type === "session.execution.succeeded") {
             if (!DONE_NOTIFY) continue
             const sessionID = sessionIDFrom(data)
@@ -470,7 +521,32 @@ export default Plugin.define({
               logEvent({ kind: "done-unknown-shape", keys: Object.keys(data ?? {}) })
               continue
             }
-            void handleDone(sessionID).catch((error) => logEvent({ kind: "done-crashed", error: String(error) }))
+            if (inFlight.has(sessionID)) continue
+            // Peek the last assistant message to decide how long to wait: question
+            // endings are delivered promptly, plain endings only after the
+            // session has been idle for a while (avoids per-turn spam).
+            let delay = DONE_DEBOUNCE_MS
+            try {
+              const msgs = [...((await ctx.session.context({ sessionID })) ?? [])]
+              const last = msgs.reverse().find((m: any) => m?.type === "assistant" && messageText(m))
+              if (last && messageText(last).trim().endsWith("?")) delay = QUESTION_DEBOUNCE_MS
+            } catch (error) {
+              logEvent({ kind: "done-peek-failed", sessionID, error: String(error) })
+            }
+            const gen = (debounceGen.get(sessionID) ?? 0) + 1
+            debounceGen.set(sessionID, gen)
+            const prev = debounceTimers.get(sessionID)
+            if (prev) clearTimeout(prev)
+            const timer = setTimeout(() => {
+              debounceTimers.delete(sessionID)
+              if (inFlight.has(sessionID)) return
+              inFlight.add(sessionID)
+              void handleDone(sessionID, gen)
+                .catch((error) => logEvent({ kind: "done-crashed", sessionID, error: String(error) }))
+                .finally(() => inFlight.delete(sessionID))
+            }, delay)
+            timer.unref?.()
+            debounceTimers.set(sessionID, timer)
           } else if (type === "permission.replied") {
             finish(String(data.requestID ?? ""))
           }

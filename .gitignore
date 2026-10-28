@@ -7,3 +7,7 @@ tg-ask.log
 
 __pycache__/
 *.pyc
+
+# promo video (hosted in GitHub Releases)
+tg-ask-promo.mp4
+tg-ask-video/target/

@@ -4,7 +4,10 @@
 
 Bridge between OpenCode and Telegram: everything OpenCode wants to ask you goes
 to the bot chat, and the answer comes straight back into the session — handy
-when you're away from the terminal.
+
+## Demo
+
+![Demo](https://github.com/pavelveter/oc2tg/blob/main/tg-ask-promo.gif?raw=true)
 
 | What happens in OpenCode | What goes to Telegram | How to reply |
 |---|---|---|
@@ -151,6 +154,8 @@ you can disable the mode in BotFather (`/setprivacy` → Disable).
 - **Task done.** When a run finishes, the session title and the final answer text go to
   Telegram as rich Markdown — headings, tables, lists, quotes and code blocks render as such.
   When the answer does not fit, whole sections continue in the next message (at most 6).
+  If the final answer ends with a question, the notice becomes interactive: your reply in
+  Telegram is fed back into the session and the run continues (up to 3 rounds per session).
   Enabled by default, `TG_ASK_DONE_NOTIFY=NO` turns it off. Each answer is sent once, even
   if the event fires again; subagent sessions and sessions of other directories are left to
   their own reporter.
